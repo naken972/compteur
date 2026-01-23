@@ -1,0 +1,77 @@
+#include <esp_now.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+
+// -------- CONFIG --------
+uint8_t receiverMacAddress[] = {0xD4, 0xE9, 0xF4, 0xA5, 0x0B, 0x50};
+
+#define BTN_TEAM1_PIN 2
+#define BTN_TEAM2_PIN 3
+#define BTN_UNDO_PIN  4
+
+typedef struct {
+  int action;
+} struct_message;
+
+struct_message myData;
+
+// -------- SEND CALLBACK --------
+void OnDataSent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Envoyé ✅" : "Échec ❌");
+}
+
+// -------- SEND --------
+void sendAction(int action) {
+  WiFi.mode(WIFI_STA);
+  esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+
+  myData.action = action;
+  esp_now_send(receiverMacAddress, (uint8_t*)&myData, sizeof(myData));
+
+  delay(80); // temps radio
+  esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
+}
+
+// -------- SETUP --------
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(BTN_TEAM1_PIN, INPUT_PULLUP);
+  pinMode(BTN_TEAM2_PIN, INPUT_PULLUP);
+  pinMode(BTN_UNDO_PIN,  INPUT_PULLUP);
+
+  WiFi.mode(WIFI_STA);
+  btStop();
+
+  esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
+
+  esp_now_init();
+  esp_now_register_send_cb(OnDataSent);
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, receiverMacAddress, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  esp_now_add_peer(&peerInfo);
+}
+
+// -------- LOOP --------
+void loop() {
+
+  if (digitalRead(BTN_TEAM1_PIN) == LOW) {
+    sendAction(1);
+    delay(300);
+  }
+
+  if (digitalRead(BTN_TEAM2_PIN) == LOW) {
+    sendAction(2);
+    delay(300);
+  }
+
+  if (digitalRead(BTN_UNDO_PIN) == LOW) {
+    sendAction(3);
+    delay(300);
+  }
+
+  delay(20); // CPU idle
+}
