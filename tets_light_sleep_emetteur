@@ -1,127 +1,46 @@
-#include <esp_now.h>
-#include <WiFi.h>
-#include <esp_sleep.h>
+#define BUTTON1 0 // D0 / GPIO0
+#define BUTTON2 1 // D1 / GPIO1
+#define BUTTON3 2 // D2 / GPIO2
 
-// ------------------- CONFIGURATION -------------------
-uint8_t receiverMacAddress[] = {0xEC, 0xE3, 0x34, 0x67, 0x56, 0xBC}; 
+#include "esp_sleep.h"
 
-const int BTN_TEAM1_PIN = 2;
-const int BTN_TEAM2_PIN = 3;
-const int BTN_UNDO_PIN  = 4;
-
-// ------------------- STRUCTURE -------------------
-typedef struct struct_message {
-    int action;
-} struct_message;
-
-struct_message myData;
-
-// ------------------- DEBOUNCE / APPUI LONG -------------------
-unsigned long debounceDelay = 50;
-unsigned long lastDebounceTimeBtn1 = 0;
-unsigned long lastDebounceTimeBtn2 = 0;
-unsigned long lastDebounceTimeBtn3 = 0;
-
-int lastBtn1State = HIGH;
-int lastBtn2State = HIGH;
-int lastBtn3State = HIGH;
-
-int lastBtn1Reading = HIGH;
-int lastBtn2Reading = HIGH;
-int lastBtn3Reading = HIGH;
-
-const unsigned long REQUIRED_LONG_PRESS_DURATION = 3000;
-unsigned long undoButtonPressTime = 0;
-bool undoButtonSentLongPress = false;
-
-// ------------------- ESP-NOW CALLBACK -------------------
-void OnDataSent(const wifi_tx_info_t *, esp_now_send_status_t status) {
-    Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Envoyé ✅" : "Échec ❌");
-}
-
-void sendAction(int action) {
-    myData.action = action;
-    esp_now_send(receiverMacAddress, (uint8_t*)&myData, sizeof(myData));
-}
-
-// ------------------- SETUP -------------------
 void setup() {
-    Serial.begin(115200);
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("Setup start");
 
-    pinMode(BTN_TEAM1_PIN, INPUT_PULLUP);
-    pinMode(BTN_TEAM2_PIN, INPUT_PULLUP);
-    pinMode(BTN_UNDO_PIN, INPUT_PULLUP);
+  // Configurer les boutons comme entrées avec pull-up
+  pinMode(BUTTON1, INPUT_PULLUP);
+  pinMode(BUTTON2, INPUT_PULLUP);
+  pinMode(BUTTON3, INPUT_PULLUP);
 
-    WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false); // important : on gère le sleep nous-mêmes
+  // Configurer les broches pour réveiller depuis le light sleep
+  gpio_wakeup_enable((gpio_num_t)BUTTON1, GPIO_INTR_LOW_LEVEL);
+  gpio_wakeup_enable((gpio_num_t)BUTTON2, GPIO_INTR_LOW_LEVEL);
+  gpio_wakeup_enable((gpio_num_t)BUTTON3, GPIO_INTR_LOW_LEVEL);
 
-    esp_now_init();
-    esp_now_register_send_cb(OnDataSent);
+  Serial.println("Entering light sleep...");
 
-    esp_now_peer_info_t peerInfo = {};
-    memcpy(peerInfo.peer_addr, receiverMacAddress, 6);
-    esp_now_add_peer(&peerInfo);
+  // Entrer en light sleep
+  esp_light_sleep_start();
 
-    // GPIO wake-up (n'importe quel bouton)
-    esp_sleep_enable_gpio_wakeup();
-    gpio_wakeup_enable((gpio_num_t)BTN_TEAM1_PIN, GPIO_INTR_LOW_LEVEL);
-    gpio_wakeup_enable((gpio_num_t)BTN_TEAM2_PIN, GPIO_INTR_LOW_LEVEL);
-    gpio_wakeup_enable((gpio_num_t)BTN_UNDO_PIN,  GPIO_INTR_LOW_LEVEL);
+  // Dès qu’on se réveille
+  Serial.println("Woke up from light sleep!");
+
+  if (digitalRead(BUTTON1) == LOW) Serial.println("Button 1 pressed");
+  if (digitalRead(BUTTON2) == LOW) Serial.println("Button 2 pressed");
+  if (digitalRead(BUTTON3) == LOW) Serial.println("Button 3 pressed");
+
+  Serial.println("Setup complete");
 }
 
-// ------------------- LOOP -------------------
 void loop() {
-    unsigned long currentTime = millis();
-    bool activity = false;
+  // Rester actif pour test
+  delay(1000);
+  Serial.println("Loop running, press a button to sleep again...");
+  
+  // Réentrer en light sleep
+  esp_light_sleep_start();
 
-    // --- Bouton 1 ---
-    int r1 = digitalRead(BTN_TEAM1_PIN);
-    if (r1 != lastBtn1Reading) lastDebounceTimeBtn1 = currentTime;
-    if ((currentTime - lastDebounceTimeBtn1) > debounceDelay && r1 != lastBtn1State) {
-        lastBtn1State = r1;
-        if (r1 == LOW) sendAction(1);
-        activity = true;
-    }
-    lastBtn1Reading = r1;
-
-    // --- Bouton 2 ---
-    int r2 = digitalRead(BTN_TEAM2_PIN);
-    if (r2 != lastBtn2Reading) lastDebounceTimeBtn2 = currentTime;
-    if ((currentTime - lastDebounceTimeBtn2) > debounceDelay && r2 != lastBtn2State) {
-        lastBtn2State = r2;
-        if (r2 == LOW) sendAction(2);
-        activity = true;
-    }
-    lastBtn2Reading = r2;
-
-    // --- Bouton 3 ---
-    int r3 = digitalRead(BTN_UNDO_PIN);
-    if (r3 != lastBtn3Reading) lastDebounceTimeBtn3 = currentTime;
-
-    if ((currentTime - lastDebounceTimeBtn3) > debounceDelay) {
-        if (r3 == LOW && lastBtn3State == HIGH) {
-            undoButtonPressTime = currentTime;
-            undoButtonSentLongPress = false;
-        }
-
-        if (r3 == LOW && !undoButtonSentLongPress &&
-            (currentTime - undoButtonPressTime >= REQUIRED_LONG_PRESS_DURATION)) {
-            sendAction(4);
-            undoButtonSentLongPress = true;
-            activity = true;
-        }
-
-        if (r3 == HIGH && lastBtn3State == LOW && !undoButtonSentLongPress) {
-            sendAction(3);
-            activity = true;
-        }
-
-        lastBtn3State = r3;
-    }
-    lastBtn3Reading = r3;
-
-    // 🌙 Light sleep si aucune activité
-    if (!activity) {
-        esp_light_sleep_start();
-    }
+  Serial.println("Woke up again!");
 }
