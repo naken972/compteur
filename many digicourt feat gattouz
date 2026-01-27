@@ -6,230 +6,162 @@
 // =======================================================
 // === CONFIGURATION ÉCRAN HUB75 64x32 ====================
 // =======================================================
-
 #define PANEL_RES_X 64
 #define PANEL_RES_Y 32
 #define PANEL_CHAIN 1
 
-HUB75_I2S_CFG mxconfig(
-  PANEL_RES_X,
-  PANEL_RES_Y,
-  PANEL_CHAIN
-);
-
+HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
 MatrixPanel_I2S_DMA *dma_display;
 
 // =======================================================
-// === STRUCTURE ESP-NOW =================================
+// === VARIABLES DE SCORE ================================
 // =======================================================
-
-typedef struct struct_message {
-  int action; // 1 = point Team1, 2 = point Team2, 3 = annulation
-} struct_message;
-
-struct_message incomingData;
-
-// =======================================================
-// === VARIABLES SCORE ===================================
-// =======================================================
-
 int pointsTeam1_raw = 0;
 int pointsTeam2_raw = 0;
-
 int gamesTeam1 = 0;
 int gamesTeam2 = 0;
-
-int setsTeam1 = 0;
-int setsTeam2 = 0;
-
+int setScores1[3] = {0, 0, 0};
+int setScores2[3] = {0, 0, 0};
+int currentSetIdx = 0;
 bool advTeam1 = false;
 bool advTeam2 = false;
 bool inTieBreak = false;
 
 std::vector<int> currentGameActions;
-
 const char* pointStr[] = {"0", "15", "30", "40"};
 
 // =======================================================
-// === AFFICHAGE SUR ÉCRAN ================================
+// === AFFICHAGE STYLE TV =================================
 // =======================================================
-
 void drawScore() {
   dma_display->clearScreen();
   dma_display->setTextWrap(false);
-  dma_display->setTextSize(1);
 
-  // --- SETS ---
-  dma_display->setCursor(0, 0);
-  dma_display->setTextColor(dma_display->color565(255, 255, 255));
-  dma_display->printf("SETS %d-%d", setsTeam1, setsTeam2);
+  uint16_t colorT1 = dma_display->color565(255, 0, 0); 
+  uint16_t colorT2 = dma_display->color565(0, 0, 255); 
+  uint16_t white  = dma_display->color565(200, 200, 200);
+  uint16_t yellow = dma_display->color565(255, 255, 0);
+  uint16_t grey   = dma_display->color565(40, 40, 40);
 
-  // --- GAMES ou TIE-BREAK ---
-  dma_display->setCursor(0, 10);
+  // Ligne de séparation centrale
+  dma_display->drawFastHLine(0, 15, 64, grey);
+
+  // Préparation des points (Jeu en cours)
+  String p1, p2;
   if (inTieBreak) {
-    dma_display->setTextColor(dma_display->color565(255, 255, 0));
-    dma_display->printf("TIE  %d-%d", pointsTeam1_raw, pointsTeam2_raw);
-    return;
+    p1 = String(pointsTeam1_raw); p2 = String(pointsTeam2_raw);
+  } else if (advTeam1) { p1 = "Ad"; p2 = "40"; }
+    else if (advTeam2) { p1 = "40"; p2 = "Ad"; }
+    else if (pointsTeam1_raw >= 3 && pointsTeam2_raw >= 3) { p1 = "40"; p2 = "40"; }
+    else { p1 = pointStr[pointsTeam1_raw]; p2 = pointStr[pointsTeam2_raw]; }
+
+  // --- LIGNE 1 : TEAM A ---
+  dma_display->setTextSize(1);
+  dma_display->setTextColor(colorT1);
+  dma_display->setCursor(2, 4);
+  dma_display->print("A");
+
+  dma_display->setTextColor(colorT1);
+  for(int i=0; i<3; i++) {
+    if (i <= currentSetIdx) {
+      dma_display->setCursor(12 + (i*9), 4);
+      dma_display->print(i == currentSetIdx ? gamesTeam1 : setScores1[i]);
+    }
   }
+  // Points du jeu en TAILLE 2
+  dma_display->setTextSize(2);
+  dma_display->setTextColor(colorT1);
+  int offset1 = (p1.length() > 1) ? 40 : 48; // Ajuste si "Ad" ou "40"
+  dma_display->setCursor(offset1, 1); 
+  dma_display->print(p1);
 
-  dma_display->setTextColor(dma_display->color565(0, 255, 255));
-  dma_display->printf("GAMES %d-%d", gamesTeam1, gamesTeam2);
+  // --- LIGNE 2 : TEAM B ---
+  dma_display->setTextSize(1);
+  dma_display->setTextColor(colorT2);
+  dma_display->setCursor(2, 20);
+  dma_display->print("B");
 
-  // --- POINTS ---
-  const char* pt1;
-  const char* pt2;
-
-  if (advTeam1) {
-    pt1 = "Ad"; pt2 = "40";
-  } else if (advTeam2) {
-    pt1 = "40"; pt2 = "Ad";
-  } else if (pointsTeam1_raw >= 3 && pointsTeam2_raw >= 3) {
-    pt1 = "40"; pt2 = "40";
-  } else {
-    pt1 = pointStr[pointsTeam1_raw];
-    pt2 = pointStr[pointsTeam2_raw];
+  dma_display->setTextColor(colorT2);
+  for(int i=0; i<3; i++) {
+    if (i <= currentSetIdx) {
+      dma_display->setCursor(12 + (i*9), 20);
+      dma_display->print(i == currentSetIdx ? gamesTeam2 : setScores2[i]);
+    }
   }
-
-  dma_display->setCursor(0, 20);
-  dma_display->setTextColor(dma_display->color565(0, 255, 0));
-  dma_display->printf("PTS %s-%s", pt1, pt2);
+  // Points du jeu en TAILLE 2
+  dma_display->setTextSize(2);
+  dma_display->setTextColor(colorT2);
+  int offset2 = (p2.length() > 1) ? 40 : 48;
+  dma_display->setCursor(offset2, 17);
+  dma_display->print(p2);
 }
 
 // =======================================================
-// === LOGIQUE DE SCORE (INCHANGÉE) =======================
+// === LOGIQUE DE CALCUL (SIMULATION) ====================
 // =======================================================
-
-void scorePoint(int team) {
-  currentGameActions.push_back(team);
-  recalcPoints();
-}
-
-void undoLast() {
-  if (!currentGameActions.empty()) {
-    currentGameActions.pop_back();
-    recalcPoints();
-  }
-}
-
 void recalcPoints() {
-  pointsTeam1_raw = 0;
-  pointsTeam2_raw = 0;
-  advTeam1 = false;
-  advTeam2 = false;
+  int p1 = 0, p2 = 0, g1 = 0, g2 = 0, s1[3] = {0,0,0}, s2[3] = {0,0,0}, setIdx = 0;
+  bool tieBreak = false;
 
   for (int act : currentGameActions) {
-    if (act == 1) pointsTeam1_raw++;
-    else if (act == 2) pointsTeam2_raw++;
-  }
+    if (act == 1) p1++; else p2++;
 
-  if (inTieBreak) {
-    if (pointsTeam1_raw >= 7 && pointsTeam1_raw >= pointsTeam2_raw + 2) {
-      setsTeam1++;
-      gamesTeam1 = gamesTeam2 = 0;
-      currentGameActions.clear();
-      inTieBreak = false;
-    } else if (pointsTeam2_raw >= 7 && pointsTeam2_raw >= pointsTeam1_raw + 2) {
-      setsTeam2++;
-      gamesTeam1 = gamesTeam2 = 0;
-      currentGameActions.clear();
-      inTieBreak = false;
-    }
-  } else {
-    bool gameWon = false;
+    if (tieBreak) {
+      if (p1 >= 7 && (p1 - p2 >= 2)) { s1[setIdx]=g1; s2[setIdx]=g2; g1=0; g2=0; p1=0; p2=0; setIdx++; tieBreak=false; }
+      else if (p2 >= 7 && (p2 - p1 >= 2)) { s1[setIdx]=g1; s2[setIdx]=g2; g1=0; g2=0; p1=0; p2=0; setIdx++; tieBreak=false; }
+    } else {
+      bool gameEnd = false;
+      if (p1 > 3 && p1 >= p2 + 2) { g1++; gameEnd = true; }
+      else if (p2 > 3 && p2 >= p1 + 2) { g2++; gameEnd = true; }
 
-    if (pointsTeam1_raw >= 3 && pointsTeam2_raw >= 3) {
-      if (pointsTeam1_raw == pointsTeam2_raw) {
-        advTeam1 = advTeam2 = false;
-      } else if (pointsTeam1_raw == pointsTeam2_raw + 1) {
-        advTeam1 = true;
-      } else if (pointsTeam2_raw == pointsTeam1_raw + 1) {
-        advTeam2 = true;
-      } else if (pointsTeam1_raw >= pointsTeam2_raw + 2) {
-        gamesTeam1++; gameWon = true;
-      } else if (pointsTeam2_raw >= pointsTeam1_raw + 2) {
-        gamesTeam2++; gameWon = true;
-      }
-    } else if (pointsTeam1_raw > 3) {
-      gamesTeam1++; gameWon = true;
-    } else if (pointsTeam2_raw > 3) {
-      gamesTeam2++; gameWon = true;
-    }
-
-    if (gameWon) {
-      currentGameActions.clear();
-
-      if (gamesTeam1 == 6 && gamesTeam2 == 6) {
-        inTieBreak = true;
-        pointsTeam1_raw = pointsTeam2_raw = 0;
-      } else if ((gamesTeam1 >= 6 && gamesTeam1 - gamesTeam2 >= 2) || gamesTeam1 == 7) {
-        setsTeam1++;
-        gamesTeam1 = gamesTeam2 = 0;
-      } else if ((gamesTeam2 >= 6 && gamesTeam2 - gamesTeam1 >= 2) || gamesTeam2 == 7) {
-        setsTeam2++;
-        gamesTeam1 = gamesTeam2 = 0;
+      if (gameEnd) {
+        p1 = 0; p2 = 0;
+        if (g1 == 6 && g2 == 6) tieBreak = true;
+        else if ((g1 >= 6 && g1 - g2 >= 2) || g1 == 7) { s1[setIdx]=g1; s2[setIdx]=g2; g1=0; g2=0; setIdx++; }
+        else if ((g2 >= 6 && g2 - g1 >= 2) || g2 == 7) { s1[setIdx]=g1; s2[setIdx]=g2; g1=0; g2=0; setIdx++; }
       }
     }
   }
 
-  if (currentGameActions.empty() && !inTieBreak) {
-    pointsTeam1_raw = pointsTeam2_raw = 0;
-  }
+  pointsTeam1_raw = p1; pointsTeam2_raw = p2;
+  gamesTeam1 = g1; gamesTeam2 = g2;
+  currentSetIdx = (setIdx > 2) ? 2 : setIdx;
+  inTieBreak = tieBreak;
+  for(int i=0; i<3; i++) { setScores1[i] = s1[i]; setScores2[i] = s2[i]; }
+
+  advTeam1 = (!tieBreak && p1 >= 3 && p2 >= 3 && p1 == p2 + 1);
+  advTeam2 = (!tieBreak && p1 >= 3 && p2 >= 3 && p2 == p1 + 1);
 
   drawScore();
 }
 
-// =======================================================
-// === ESP-NOW CALLBACK =================================
-// =======================================================
+void scorePoint(int team) { currentGameActions.push_back(team); recalcPoints(); }
+void undoLast() { if (!currentGameActions.empty()) { currentGameActions.pop_back(); recalcPoints(); } }
+
+typedef struct struct_message { int action; } struct_message;
+struct_message incomingData;
 
 void onReceive(const esp_now_recv_info *info, const uint8_t *data, int len) {
   memcpy(&incomingData, data, sizeof(incomingData));
-
   if (incomingData.action == 1) scorePoint(1);
   else if (incomingData.action == 2) scorePoint(2);
   else if (incomingData.action == 3) undoLast();
 }
 
-// =======================================================
-// === SETUP =============================================
-// =======================================================
-
 void setup() {
-  Serial.begin(115200);
-
-  // --- ÉCRAN ---
-  mxconfig.gpio.r1  = 18;
-  mxconfig.gpio.g1  = 25;
-  mxconfig.gpio.b1  = 5;
-  mxconfig.gpio.r2  = 22;
-  mxconfig.gpio.g2  = 33;
-  mxconfig.gpio.b2  = 16;
-  mxconfig.gpio.a   = 4;
-  mxconfig.gpio.b   = 3;
-  mxconfig.gpio.c   = 0;
-  mxconfig.gpio.d   = 21;
-  mxconfig.gpio.e   = 32;
-  mxconfig.gpio.lat = 19;
-  mxconfig.gpio.oe  = 15;
-  mxconfig.gpio.clk = 2;
-  mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_8M;
-
+  mxconfig.gpio.r1=18; mxconfig.gpio.g1=25; mxconfig.gpio.b1=5;
+  mxconfig.gpio.r2=22; mxconfig.gpio.g2=33; mxconfig.gpio.b2=16;
+  mxconfig.gpio.a=4; mxconfig.gpio.b=3; mxconfig.gpio.c=0; mxconfig.gpio.d=21; mxconfig.gpio.e=32;
+  mxconfig.gpio.lat=19; mxconfig.gpio.oe=15; mxconfig.gpio.clk=2;
+  
   dma_display = new MatrixPanel_I2S_DMA(mxconfig);
   dma_display->begin();
-  dma_display->setBrightness8(120);
+  dma_display->setBrightness8(150);
 
-  // --- ESP-NOW ---
   WiFi.mode(WIFI_STA);
   esp_now_init();
   esp_now_register_recv_cb(onReceive);
-
-  recalcPoints(); // affichage initial
+  recalcPoints();
 }
 
-// =======================================================
-// === LOOP ==============================================
-// =======================================================
-
-void loop() {
-  delay(50);
-}
+void loop() { delay(10); }
