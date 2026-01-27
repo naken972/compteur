@@ -1,145 +1,105 @@
 #include <esp_now.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 
-// ------------------- CONFIGURATION -------------------
-
-// Adresse MAC du récepteur
+// -------- CONFIG --------
 uint8_t receiverMacAddress[] = {0xD4, 0xE9, 0xF4, 0xA5, 0x0B, 0x50};
-// Broches des boutons (Xiao ESP32-C3)
-const int BTN_TEAM1_PIN = 2; // D0
-const int BTN_TEAM2_PIN = 3; // D1
-const int BTN_UNDO_PIN  = 4; // D2
 
-// ------------------- STRUCTURE -------------------
-typedef struct struct_message {
-    int action; // 1 = Team1, 2 = Team2, 3 = Annulation (court), 4 = Reset (long)
+#define BTN_TEAM1_PIN 2
+#define BTN_TEAM2_PIN 3
+#define BTN_UNDO_PIN  4
+
+#define DEBOUNCE_MS 200   // simple et efficace
+
+typedef struct {
+  int action;
 } struct_message;
 
 struct_message myData;
 
-// ------------------- GESTION DEBOUNCE & APPUI LONG -------------------
-unsigned long debounceDelay = 50;
+// -------- STATES --------
+int lastBtn1 = HIGH;
+int lastBtn2 = HIGH;
+int lastBtn3 = HIGH;
 
-unsigned long lastDebounceTimeBtn1 = 0;
-unsigned long lastDebounceTimeBtn2 = 0;
-unsigned long lastDebounceTimeBtn3 = 0;
+unsigned long lastActionTime1 = 0;
+unsigned long lastActionTime2 = 0;
+unsigned long lastActionTime3 = 0;
 
-int lastBtn1State = HIGH;
-int lastBtn2State = HIGH;
-int lastBtn3State = HIGH;
-
-int lastBtn1Reading = HIGH;
-int lastBtn2Reading = HIGH;
-int lastBtn3Reading = HIGH;
-
-// Appui long
-const unsigned long REQUIRED_LONG_PRESS_DURATION = 3000; // 3 secondes
-unsigned long undoButtonPressTime = 0; 
-bool undoButtonSentLongPress = false; 
-
-// ------------------- CALLBACK ESP-NOW -------------------
+// -------- CALLBACK --------
 void OnDataSent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
-    Serial.print("Statut envoi: ");
-    Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Livraison OK ✅" : "Livraison échouée ❌");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Envoyé ✅" : "Échec ❌");
+  esp_wifi_set_ps(WIFI_PS_MAX_MODEM); // radio dort
 }
 
-// ------------------- FONCTION D'ENVOI -------------------
+// -------- SEND --------
 void sendAction(int action) {
-    myData.action = action;
-    esp_err_t result = esp_now_send(receiverMacAddress, (uint8_t*)&myData, sizeof(myData));
-    Serial.printf("Action %d envoyée %s.\n", action, result == ESP_OK ? "avec succès" : "ERREUR");
+  Serial.print("Action ");
+  Serial.print(action);
+  Serial.println(" envoyée");
+
+  esp_wifi_set_ps(WIFI_PS_MIN_MODEM); // radio ON
+  myData.action = action;
+  esp_now_send(receiverMacAddress, (uint8_t*)&myData, sizeof(myData));
 }
 
-// ------------------- SETUP -------------------
+// -------- SETUP --------
 void setup() {
-    Serial.begin(115200);
-    delay(500);
-    Serial.println("Émetteur Tennis/Padel prêt ✅");
+  Serial.begin(115200);
+  delay(200);
 
-    pinMode(BTN_TEAM1_PIN, INPUT_PULLUP);
-    pinMode(BTN_TEAM2_PIN, INPUT_PULLUP);
-    pinMode(BTN_UNDO_PIN, INPUT_PULLUP);
+  setCpuFrequencyMhz(80);   // 🔋 gros gain
+  Serial.println("CPU 80 MHz");
 
-    WiFi.mode(WIFI_STA);
-    delay(100);
+  pinMode(BTN_TEAM1_PIN, INPUT_PULLUP);
+  pinMode(BTN_TEAM2_PIN, INPUT_PULLUP);
+  pinMode(BTN_UNDO_PIN,  INPUT_PULLUP);
 
-    if (esp_now_init() != ESP_OK) {
-        Serial.println("Erreur d'initialisation ESP-NOW ❌");
-        return;
-    }
+  WiFi.mode(WIFI_STA);
+  btStop();
 
-    esp_now_register_send_cb(OnDataSent);
+  esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
 
-    esp_now_peer_info_t peerInfo = {};
-    memcpy(peerInfo.peer_addr, receiverMacAddress, 6);
-    peerInfo.channel = 0;
-    peerInfo.encrypt = false;
+  esp_now_init();
+  esp_now_register_send_cb(OnDataSent);
 
-    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-        Serial.println("Erreur ajout du peer ❌");
-        return;
-    }
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, receiverMacAddress, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  esp_now_add_peer(&peerInfo);
 
-    Serial.print("Adresse MAC de cet émetteur : ");
-    Serial.println(WiFi.macAddress());
-    Serial.println("Récepteur Tennis/Padel prêt ✅");
-  Serial.print("Adresse MAC : ");
-  Serial.println(WiFi.macAddress());
-    Serial.println("Prêt à envoyer des actions...");
+  Serial.println("Prêt (version fiable)");
 }
 
-// ------------------- LOOP -------------------
+// -------- LOOP --------
 void loop() {
-    unsigned long currentTime = millis();
+  unsigned long now = millis();
 
-    // --- Bouton 1 (Team 1) ---
-    int reading1 = digitalRead(BTN_TEAM1_PIN);
-    if (reading1 != lastBtn1Reading) lastDebounceTimeBtn1 = currentTime;
-    if ((currentTime - lastDebounceTimeBtn1) > debounceDelay && reading1 != lastBtn1State) {
-        lastBtn1State = reading1;
-        if (lastBtn1State == LOW) sendAction(1);
-    }
-    lastBtn1Reading = reading1;
+  int r1 = digitalRead(BTN_TEAM1_PIN);
+  int r2 = digitalRead(BTN_TEAM2_PIN);
+  int r3 = digitalRead(BTN_UNDO_PIN);
 
-    // --- Bouton 2 (Team 2) ---
-    int reading2 = digitalRead(BTN_TEAM2_PIN);
-    if (reading2 != lastBtn2Reading) lastDebounceTimeBtn2 = currentTime;
-    if ((currentTime - lastDebounceTimeBtn2) > debounceDelay && reading2 != lastBtn2State) {
-        lastBtn2State = reading2;
-        if (lastBtn2State == LOW) sendAction(2);
-    }
-    lastBtn2Reading = reading2;
+  // --- TEAM 1 ---
+  if (lastBtn1 == HIGH && r1 == LOW && (now - lastActionTime1) > DEBOUNCE_MS) {
+    lastActionTime1 = now;
+    sendAction(1);
+  }
+  lastBtn1 = r1;
 
-    // --- Bouton 3 (Annuler/Reset) ---
-    int reading3 = digitalRead(BTN_UNDO_PIN);
-    if (reading3 != lastBtn3Reading) lastDebounceTimeBtn3 = currentTime;
+  // --- TEAM 2 ---
+  if (lastBtn2 == HIGH && r2 == LOW && (now - lastActionTime2) > DEBOUNCE_MS) {
+    lastActionTime2 = now;
+    sendAction(2);
+  }
+  lastBtn2 = r2;
 
-    if ((currentTime - lastDebounceTimeBtn3) > debounceDelay) {
+  // --- UNDO ---
+  if (lastBtn3 == HIGH && r3 == LOW && (now - lastActionTime3) > DEBOUNCE_MS) {
+    lastActionTime3 = now;
+    sendAction(3);
+  }
+  lastBtn3 = r3;
 
-        // Front descendant
-        if (reading3 == LOW && lastBtn3State == HIGH) {
-            undoButtonPressTime = currentTime;
-            undoButtonSentLongPress = false;
-        }
-
-        // Vérification appui long
-        if (reading3 == LOW && !undoButtonSentLongPress && (currentTime - undoButtonPressTime >= REQUIRED_LONG_PRESS_DURATION)) {
-            sendAction(4); // RESET
-            undoButtonSentLongPress = true;
-            Serial.println("Bouton 3 maintenu 3s : RESET envoyé !");
-        }
-
-        // Front montant
-        if (reading3 == HIGH && lastBtn3State == LOW) {
-            if (!undoButtonSentLongPress) {
-                sendAction(3); // ANNULATION
-                Serial.println("Bouton 3 relâché : Annulation envoyée !");
-            }
-        }
-
-        lastBtn3State = reading3;
-    }
-    lastBtn3Reading = reading3;
-
-    delay(10);
+  delay(10); // CPU idle
 }
