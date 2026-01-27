@@ -22,14 +22,14 @@ Ce dépôt contient la liste des composants, le budget et les spécifications te
 |  | Panneau LED RGB Matrix | 10,19 € | Affichage principal |
 |  | ESP32-S3 DevKit | 4,29 € | Microcontrôleur récepteur |
 |  | Support Batterie 18650 | 0,89 € | Logement pile |
-|  | Batterie 18650 (x1) | 2,84 € | (Basé sur pack de 10 à 28,39€) |
+|  | Batterie 18650 (x3) | 8.52 € | (Basé sur pack de 10 à 28,39€) |
 |  | Module de charge TP4056 | 0,69 € | Gestion charge USB |
 |  | Convertisseur Boost MT3608 | 0,59 € | Élévateur de tension (3.7V vers 5V) |
 | **Émetteur** | ESP32-C3 SuperMini | 5,69 € | Ultra-compact |
 |  | Batterie LiPo 60mAh | 4,99 € | Alimentation émetteur |
 | **Logistique** | Câblage (Silicone/AWG) | 5,76 € | Connexions |
-|  | Consommables (PLA, Étain, Boutons) | 10,00 € | Estimation châssis et soudure |
-| **TOTAL** |  | **57,60 €** |  |
+|  | Consommables (PLA, Étain, Boutons) frais de port | 10,00 € | Estimation châssis et soudure |
+| **TOTAL** |  | **63,28 €** |  |
 
 ---
 
