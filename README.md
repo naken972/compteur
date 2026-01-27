@@ -49,24 +49,3 @@ L'émetteur utilise un ESP32-C3 pour sa taille réduite, idéal pour une intégr
 * **Attention Batterie :** La batterie de **60mAh** est très petite. L'ESP32 consommant environ  en mode actif, l'autonomie sera d'environ **30 à 40 minutes**.
 * *Conseil :* Utiliser le protocole **ESP-NOW** plutôt que le Wi-Fi classique pour réduire la consommation et la latence.
 
-
-
----
-
-## 📌 Conseils de Montage & Optimisations
-
-1. **Refroidissement :** Le panneau LED peut chauffer s'il est utilisé à pleine puissance. Prévoyez des aérations dans votre boîtier imprimé en PLA.
-2. **Section des câbles :** Pour l'alimentation du panneau LED, utilisez des câbles de section suffisante (le câble silicone à 5.76€ est un bon choix) pour éviter les chutes de tension.
-3. **Calibrage Boost :** Avant de brancher le Shield, tournez la vis du potentiomètre du module MT3608 pour régler la sortie précisément sur **5.0V**.
-
----
-
-## 🚀 Prochaines Étapes
-
-* [ ] Modélisation du boîtier sous Fusion360/Tinkercad.
-* [ ] Test de communication via ESP-NOW.
-* [ ] Assemblage du circuit de charge.
-
----
-
-**Veux-tu que je t'aide à rédiger le code de base en C++ (Arduino IDE) pour tester la communication entre l'émetteur et le récepteur ?**
