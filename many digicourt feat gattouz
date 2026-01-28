@@ -142,22 +142,18 @@ bool computeServer(bool tieBreak, int p1, int p2, int g1, int g2) {
     return ((totalPoints - 1) / 2) % 2 == 0 ? !serverA : serverA;
 }
 
-// ================= SCORE ENGINE CORRIGÉ V2 =================
 void recalcPoints() {
     int p1 = 0, p2 = 0, g1 = 0, g2 = 0;
     int s1[3] = {0}, s2[3] = {0}, setIdx = 0;
     bool tieBreak = false;
     
-    // Compteur d'égalités (40-40) dans le jeu en cours
     int deuceCountInGame = 0; 
 
     // --- 1. RECALCUL DE L'HISTORIQUE ---
     for (int act : currentGameActions) {
-        // On ajoute le point
         if (act == 1) p1++; else p2++;
 
         if (tieBreak) {
-            // LOGIQUE TIE BREAK
             if (p1 >= 7 && p1 - p2 >= 2) { 
                 s1[setIdx] = g1 + 1; s2[setIdx] = g2;
                 g1 = g2 = p1 = p2 = 0; setIdx++; tieBreak = false; 
@@ -166,46 +162,32 @@ void recalcPoints() {
                 g1 = g2 = p1 = p2 = 0; setIdx++; tieBreak = false; 
             }
         } else {
-            // JEU NORMAL
-            
-            // Détection du 40-40 (Egalité)
-            if (p1 >= 3 && p2 >= 3 && p1 == p2) {
-                deuceCountInGame++;
-            }
+            if (p1 >= 3 && p2 >= 3 && p1 == p2) deuceCountInGame++;
 
             bool gameWon = false;
             bool isGoldenPoint = false;
 
-            // --- APPLICATION DES REGLES ---
             if (configAdvantageMode == 1) { 
-                // MODE 1: PUNTO DE ORO (No Ad)
-                // Dès 40-40 (3-3), c'est point décisif
                 if (p1 >= 3 && p2 >= 3) isGoldenPoint = true;
             } 
             else if (configAdvantageMode == 2) {
-                // MODE 2: 3AD (2 Ads puis Golden Point)
-                // Au 3ème 40-40 (Count = 3), c'est point décisif
                 if (deuceCountInGame >= 3) isGoldenPoint = true;
             } 
 
             if (isGoldenPoint) {
-                // Règle Point en Or : le premier qui mène gagne
                 if (p1 > p2) gameWon = true;
                 else if (p2 > p1) gameWon = true;
             } else {
-                // Règle Standard (Ecart de 2 points)
                 if (p1 > 3 && p1 >= p2 + 2) gameWon = true;
                 else if (p2 > 3 && p2 >= p1 + 2) gameWon = true;
             }
 
-            // --- FIN DU JEU ---
             if (gameWon) {
                 if (p1 > p2) g1++; else g2++;
                 p1 = p2 = 0;
-                deuceCountInGame = 0; // Reset compteur
+                deuceCountInGame = 0;
             }
 
-            // --- GESTION DES SETS ---
             if (g1 == configGamesPerSet && g2 == configGamesPerSet) {
                 tieBreak = true;
             }
@@ -236,18 +218,24 @@ void recalcPoints() {
     gamesTeam1 = g1; gamesTeam2 = g2;
     currentSetIdx = min(setIdx, 2);
 
-    if (tieBreak && !tieBreakTriggered && currentState == STATE_GAME) {
-        tieBreakTriggered = true;
-        tieBreakAnimationActive = true;
-        tieBreakAnimationStart = millis();
+    // --- MODIFICATION ICI ---
+    if (tieBreak) {
+        // Si on entre en tie break et que l'anim n'a pas encore été déclenchée
+        if (!tieBreakTriggered && currentState == STATE_GAME) {
+            tieBreakTriggered = true;
+            tieBreakAnimationActive = true;
+            tieBreakAnimationStart = millis();
+        }
+    } else {
+        // IMPORTANT : Si on n'est PAS en tie break, on réarme le trigger pour la prochaine fois
+        tieBreakTriggered = false;
     }
+    
     inTieBreak = tieBreak;
 
     for (int i = 0; i < 3; i++) { setScores1[i] = s1[i]; setScores2[i] = s2[i]; }
 
-    // --- 3. CALCUL AFFICHAGE "Ad" (C'est ici que je corrige) ---
-    
-    // On calcule simplement : est-ce que quelqu'un a l'avantage ?
+    // --- 3. CALCUL AFFICHAGE "Ad" ---
     if (!tieBreak) {
         advTeam1 = (p1 >= 3 && p2 >= 3 && p1 == p2 + 1);
         advTeam2 = (p2 >= 3 && p1 >= 3 && p2 == p1 + 1);
@@ -256,13 +244,8 @@ void recalcPoints() {
         advTeam2 = false;
     }
 
-    // Si on est exactement sur le point en or (40-40 final), on change la couleur ?
-    // Optionnel : on pourrait utiliser cette info dans drawScore pour mettre le texte en jaune
-    // bool goldenPointActive = (configAdvantageMode == 1 && p1==3 && p2==3) || (configAdvantageMode == 2 && deuceCountInGame >= 3 && p1==p2);
-
     if (currentState == STATE_GAME) drawScore();
 }
-
 // ================= DISPLAY HELPERS =================
 void drawBall(int x, int y, uint16_t color) {
     for(int dx=0;dx<3;dx++) for(int dy=0;dy<3;dy++) dma_display->drawPixel(x+dx, y+dy, color);
@@ -278,8 +261,15 @@ void drawSpecialMessage() {
 
 void drawTieBreakAnimation() {
     uint16_t c = dma_display->color565(0, 255, 255);
+    
+    // --- MODIFICATION ICI ---
+    dma_display->setTextSize(1); // Force la taille 1 (petit texte)
+    
     if(tieBreakVisible) {
-        dma_display->setCursor(5, 12);
+        // "TIE BREAK" = 9 caractères
+        // En taille 1, ça prend environ 54 pixels de large.
+        // Écran 64px - 54px = 10px de marge => X = 5 pour centrer.
+        dma_display->setCursor(5, 12); 
         dma_display->setTextColor(c);
         dma_display->print("TIE BREAK");
     }
