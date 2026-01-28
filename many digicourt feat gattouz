@@ -13,12 +13,13 @@ MatrixPanel_I2S_DMA *dma_display;
 
 // -------- ÉTATS DU SYSTÈME --------
 enum SystemState {
+  STATE_BOOT,
   STATE_GAME,
   STATE_MENU_GAMES,    // Choix du nombre de jeux (4, 5, 6)
   STATE_MENU_ADVANTAGE // Choix de la règle d'avantage
 };
 
-SystemState currentState = STATE_GAME;
+SystemState currentState = STATE_BOOT;
 
 // -------- CONFIGURATION JEU (Variables) --------
 int configGamesPerSet = 6;    // Par défaut 6 jeux
@@ -69,7 +70,15 @@ void enterMenu() {
   currentState = STATE_MENU_GAMES;
   drawMenu();
 }
-
+void drawIntro() {
+    dma_display->clearScreen();
+    dma_display->setTextSize(1);
+    dma_display->setTextColor(dma_display->color565(0, 255, 255)); // Blanc
+    // Centrage : "DIGICOURT" fait 9 lettres. 9*6px = 54px.
+    // (64 - 54) / 2 = 5 pour X.
+    dma_display->setCursor(5, 12); 
+    dma_display->print("DIGICOURT");
+}
 void nextMenuStep() {
   if (currentState == STATE_MENU_GAMES) {
     currentState = STATE_MENU_ADVANTAGE;
@@ -400,12 +409,20 @@ void setup() {
     esp_now_init();
     esp_now_register_recv_cb(onReceive);
 
-    recalcPoints(); // Affiche le score initial (0-0)
+    drawIntro(); // Affiche le score initial (0-0)
 }
 
 void loop() {
     unsigned long now = millis();
 
+  // --- 0. GESTION DU DEMARRAGE (10 SECONDES) ---
+    if (currentState == STATE_BOOT) {
+        if (now > 10000) { // Après 10 000 ms (10 sec)
+            currentState = STATE_GAME;
+            recalcPoints(); // On lance le match et l'affichage du score
+        }
+        return; // On empêche le reste de la boucle de s'exécuter pendant l'intro
+    }
     // 1. Gestion message spécial (Grosse Merde)
     if (specialMessageActive && now - specialMessageStart > 5000) {
         specialMessageActive = false;
