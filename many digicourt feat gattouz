@@ -21,7 +21,7 @@ int currentSetIdx = 0;
 bool advTeam1 = false;
 bool advTeam2 = false;
 bool inTieBreak = false;
-bool tieBreakTriggered = false; // <-- nouveau flag
+bool tieBreakTriggered = false;
 
 std::vector<int> currentGameActions;
 const char* pointStr[] = {"0", "15", "30", "40"};
@@ -46,6 +46,23 @@ unsigned long tieBreakAnimationStart = 0;
 unsigned long lastTieBreakToggle = 0;
 bool tieBreakVisible = true;
 #define TIE_BREAK_BLINK_INTERVAL 300
+
+// ================= MESSAGE SPECIAL =================
+bool specialMessageActive = false;
+unsigned long specialMessageStart = 0;
+#define SPECIAL_MESSAGE_DURATION 10000  // 5 secondes
+
+void drawSpecialMessage() {
+    dma_display->clearScreen();
+    dma_display->setTextSize(1);
+    dma_display->setTextColor(dma_display->color565(0,255,255));
+    int y = PANEL_RES_Y / 2 - 4;
+
+    dma_display->setCursor(16, 7);
+    dma_display->print("GROSSE");
+    dma_display->setCursor(16,17); // 3 px d'écart
+    dma_display->print("MERDE");
+}
 
 // ================= SERVER LOGIC =================
 bool computeServer(bool tieBreak, int p1, int p2, int g1, int g2) {
@@ -206,7 +223,6 @@ void recalcPoints() {
         }
     }
 
-    // Détection point marqué
     if (p1 != lastP1) blinkTeam = 1;
     else if (p2 != lastP2) blinkTeam = 2;
 
@@ -226,9 +242,8 @@ void recalcPoints() {
     gamesTeam2 = g2;
     currentSetIdx = min(setIdx, 2);
 
-    // Si tie-break commence maintenant et jamais déclenché
     if (tieBreak && !tieBreakTriggered) {
-        tieBreakTriggered = true;  // <-- ne plus déclencher ensuite
+        tieBreakTriggered = true;
         startTieBreakAnimation();
     }
 
@@ -280,6 +295,11 @@ void onReceive(const esp_now_recv_info *info, const uint8_t *data, int len){
         case 2: scorePoint(2); break;
         case 3: undoLast(); break;
         case 4: resetScore(); break;
+        case 5: // appui long bouton 1
+            specialMessageActive = true;
+            specialMessageStart = millis();
+            drawSpecialMessage();
+            break;
     }
 }
 
@@ -305,17 +325,23 @@ void setup(){
 void loop(){
     updateBlink();
 
-    // Gestion animation tie-break avec clignotement
+    // Animation tie-break
     if (tieBreakAnimationActive) {
         unsigned long now = millis();
         if (now - tieBreakAnimationStart >= TIE_BREAK_ANIM_DURATION) {
             tieBreakAnimationActive = false;
-            drawScore();  // redessine les scores après animation
+            drawScore();
         } else if (now - lastTieBreakToggle >= TIE_BREAK_BLINK_INTERVAL) {
             tieBreakVisible = !tieBreakVisible;
             lastTieBreakToggle = now;
             drawScore();
         }
+    }
+
+    // Effacement automatique du message spécial après 5s
+    if (specialMessageActive && millis() - specialMessageStart >= SPECIAL_MESSAGE_DURATION) {
+        specialMessageActive = false;
+        drawScore();
     }
 
     delay(10);
