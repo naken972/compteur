@@ -21,14 +21,36 @@ int currentSetIdx = 0;
 bool advTeam1 = false;
 bool advTeam2 = false;
 bool inTieBreak = false;
+bool tieBreakTriggered = false; // <-- nouveau flag
 
 std::vector<int> currentGameActions;
 const char* pointStr[] = {"0", "15", "30", "40"};
 
+// ================= BLINK STATE =================
+bool blinkActive = false;
+unsigned long blinkStartTime = 0;
+unsigned long lastBlinkToggle = 0;
+bool blinkVisible = true;
+int blinkTeam = 0;  // 1 = A, 2 = B
+
+int lastP1 = 0;
+int lastP2 = 0;
+
+#define BLINK_DURATION 3000
+#define BLINK_INTERVAL 300
+
+// ================= TIE-BREAK ANIMATION =================
+bool tieBreakAnimationActive = false;
+unsigned long tieBreakAnimationStart = 0;
+#define TIE_BREAK_ANIM_DURATION 3000
+unsigned long lastTieBreakToggle = 0;
+bool tieBreakVisible = true;
+#define TIE_BREAK_BLINK_INTERVAL 300
+
 // ================= SERVER LOGIC =================
 bool computeServer(bool tieBreak, int p1, int p2, int g1, int g2) {
     int totalGames = g1 + g2;
-    bool serverA = (totalGames % 2 == 0);  // A sert au début
+    bool serverA = (totalGames % 2 == 0);
     if (!tieBreak) return serverA;
 
     int totalPoints = p1 + p2;
@@ -44,13 +66,38 @@ void drawBall(int x, int y, uint16_t color) {
             dma_display->drawPixel(x + dx, y + dy, color);
 }
 
+// ================= TIE BREAK ANIMATION =================
+void drawTieBreakAnimation() {
+    uint16_t color = dma_display->color565(0, 255, 255);
+    if (!tieBreakVisible) return; // clignotement
+    dma_display->setTextSize(1);
+    dma_display->setTextColor(color);
+    int x = (PANEL_RES_X / 2) - 24;
+    int y = (PANEL_RES_Y / 2) - 4;
+    dma_display->setCursor(x, y);
+    dma_display->print("Tie Break");
+}
+
+void startTieBreakAnimation() {
+    tieBreakAnimationActive = true;
+    tieBreakAnimationStart = millis();
+    lastTieBreakToggle = millis();
+    tieBreakVisible = true;
+}
+
 // ================= DISPLAY =================
 void drawScore() {
+    if (tieBreakAnimationActive) {
+        dma_display->clearScreen();
+        drawTieBreakAnimation();
+        return;
+    }
+
     dma_display->clearScreen();
     dma_display->setTextWrap(false);
 
-    uint16_t colorT1 = dma_display->color565(255, 0, 0);   // Rouge pour A
-    uint16_t colorT2 = dma_display->color565(0, 255, 0);   // Vert pour B
+    uint16_t colorT1 = dma_display->color565(255, 0, 0);
+    uint16_t colorT2 = dma_display->color565(0, 255, 0);
 
     bool team1Serving = computeServer(inTieBreak, pointsTeam1_raw, pointsTeam2_raw, gamesTeam1, gamesTeam2);
 
@@ -69,22 +116,20 @@ void drawScore() {
     dma_display->setCursor(1, 4);
     dma_display->print("A");
 
-    // Jeux
     for (int i = 0; i < 3; i++) {
         if (i <= currentSetIdx) {
-            dma_display->setCursor(16 + (i * 10), 4);
+            dma_display->setCursor(15 + (i * 9), 4);
             dma_display->print(i == currentSetIdx ? gamesTeam1 : setScores1[i]);
         }
     }
 
-    // Points
     dma_display->setTextSize(2);
     dma_display->setTextColor(colorT1);
     int x1 = 40;
     if (p1.length() == 1) x1 += 6;
     dma_display->setCursor(x1, 1);
-    dma_display->print(p1);
-
+    if (!blinkActive || blinkTeam != 1 || blinkVisible)
+        dma_display->print(p1);
     if (team1Serving) drawBall(8, 6, colorT1);
 
     // ===== TEAM B =====
@@ -95,7 +140,7 @@ void drawScore() {
 
     for (int i = 0; i < 3; i++) {
         if (i <= currentSetIdx) {
-            dma_display->setCursor(16 + (i * 10), 20);
+            dma_display->setCursor(15 + (i * 9), 20);
             dma_display->print(i == currentSetIdx ? gamesTeam2 : setScores2[i]);
         }
     }
@@ -105,37 +150,52 @@ void drawScore() {
     int x2 = 40;
     if (p2.length() == 1) x2 += 6;
     dma_display->setCursor(x2, 17);
-    dma_display->print(p2);
-
+    if (!blinkActive || blinkTeam != 2 || blinkVisible)
+        dma_display->print(p2);
     if (!team1Serving) drawBall(8, 22, colorT2);
 }
 
-// ================= RESET FUNCTION =================
+// ================= RESET =================
 void resetScore() {
-    pointsTeam1_raw = 0;
-    pointsTeam2_raw = 0;
-    gamesTeam1 = 0;
-    gamesTeam2 = 0;
+    pointsTeam1_raw = pointsTeam2_raw = 0;
+    gamesTeam1 = gamesTeam2 = 0;
     currentSetIdx = 0;
     inTieBreak = false;
     advTeam1 = false;
     advTeam2 = false;
+    tieBreakTriggered = false;
     currentGameActions.clear();
-    for (int i = 0; i < 3; i++) { setScores1[i] = 0; setScores2[i] = 0; }
+    blinkActive = false;
+    for (int i = 0; i < 3; i++) {
+        setScores1[i] = 0;
+        setScores2[i] = 0;
+    }
     drawScore();
 }
 
 // ================= SCORE ENGINE =================
 void recalcPoints() {
-    int p1 = 0, p2 = 0, g1 = 0, g2 = 0, s1[3] = {0}, s2[3] = {0}, setIdx = 0;
+    int p1 = 0, p2 = 0, g1 = 0, g2 = 0;
+    int s1[3] = {0}, s2[3] = {0}, setIdx = 0;
     bool tieBreak = false;
 
     for (int act : currentGameActions) {
         if (act == 1) p1++; else p2++;
 
         if (tieBreak) {
-            if (p1 >= 7 && p1 - p2 >= 2) { s1[setIdx]=g1; s2[setIdx]=g2; g1=g2=p1=p2=0; setIdx++; tieBreak=false; }
-            else if (p2 >= 7 && p2 - p1 >= 2) { s1[setIdx]=g1; s2[setIdx]=g2; g1=g2=p1=p2=0; setIdx++; tieBreak=false; }
+            if (p1 >= 7 && p1 - p2 >= 2) { 
+                s1[setIdx] = g1 + 1;
+                s2[setIdx] = g2;
+                g1 = g2 = p1 = p2 = 0; 
+                setIdx++; 
+                tieBreak = false; 
+            } else if (p2 >= 7 && p2 - p1 >= 2) { 
+                s1[setIdx] = g1;
+                s2[setIdx] = g2 + 1;
+                g1 = g2 = p1 = p2 = 0; 
+                setIdx++; 
+                tieBreak = false; 
+            }
         } else {
             if (p1 > 3 && p1 >= p2 + 2) { g1++; p1=p2=0; }
             else if (p2 > 3 && p2 >= p1 + 2) { g2++; p1=p2=0; }
@@ -146,14 +206,38 @@ void recalcPoints() {
         }
     }
 
+    // Détection point marqué
+    if (p1 != lastP1) blinkTeam = 1;
+    else if (p2 != lastP2) blinkTeam = 2;
+
+    if (p1 != lastP1 || p2 != lastP2) {
+        blinkActive = true;
+        blinkStartTime = millis();
+        lastBlinkToggle = millis();
+        blinkVisible = true;
+    }
+
+    lastP1 = p1;
+    lastP2 = p2;
+
     pointsTeam1_raw = p1;
     pointsTeam2_raw = p2;
     gamesTeam1 = g1;
     gamesTeam2 = g2;
     currentSetIdx = min(setIdx, 2);
+
+    // Si tie-break commence maintenant et jamais déclenché
+    if (tieBreak && !tieBreakTriggered) {
+        tieBreakTriggered = true;  // <-- ne plus déclencher ensuite
+        startTieBreakAnimation();
+    }
+
     inTieBreak = tieBreak;
 
-    for (int i = 0; i < 3; i++) { setScores1[i] = s1[i]; setScores2[i] = s2[i]; }
+    for (int i = 0; i < 3; i++) {
+        setScores1[i] = s1[i];
+        setScores2[i] = s2[i];
+    }
 
     advTeam1 = (!tieBreak && p1 >= 3 && p2 >= 3 && p1 == p2 + 1);
     advTeam2 = (!tieBreak && p2 >= 3 && p1 >= 3 && p2 == p1 + 1);
@@ -161,6 +245,27 @@ void recalcPoints() {
     drawScore();
 }
 
+// ================= BLINK UPDATE =================
+void updateBlink() {
+    if (!blinkActive) return;
+
+    unsigned long now = millis();
+
+    if (now - blinkStartTime >= BLINK_DURATION) {
+        blinkActive = false;
+        blinkVisible = true;
+        drawScore();
+        return;
+    }
+
+    if (now - lastBlinkToggle >= BLINK_INTERVAL) {
+        blinkVisible = !blinkVisible;
+        lastBlinkToggle = now;
+        drawScore();
+    }
+}
+
+// ================= API =================
 void scorePoint(int team){ currentGameActions.push_back(team); recalcPoints(); }
 void undoLast(){ if(!currentGameActions.empty()){ currentGameActions.pop_back(); recalcPoints(); }}
 
@@ -174,15 +279,16 @@ void onReceive(const esp_now_recv_info *info, const uint8_t *data, int len){
         case 1: scorePoint(1); break;
         case 2: scorePoint(2); break;
         case 3: undoLast(); break;
-        case 4: resetScore(); break;  // RESET long press
+        case 4: resetScore(); break;
     }
 }
 
-// ================= SETUP =================
+// ================= SETUP / LOOP =================
 void setup(){
     mxconfig.gpio.r1=18; mxconfig.gpio.g1=25; mxconfig.gpio.b1=5;
     mxconfig.gpio.r2=22; mxconfig.gpio.g2=33; mxconfig.gpio.b2=16;
-    mxconfig.gpio.a=4; mxconfig.gpio.b=3; mxconfig.gpio.c=0; mxconfig.gpio.d=21; mxconfig.gpio.e=32;
+    mxconfig.gpio.a=4; mxconfig.gpio.b=3; mxconfig.gpio.c=0;
+    mxconfig.gpio.d=21; mxconfig.gpio.e=32;
     mxconfig.gpio.lat=19; mxconfig.gpio.oe=15; mxconfig.gpio.clk=2;
 
     dma_display = new MatrixPanel_I2S_DMA(mxconfig);
@@ -196,4 +302,21 @@ void setup(){
     recalcPoints();
 }
 
-void loop(){ delay(10); }
+void loop(){
+    updateBlink();
+
+    // Gestion animation tie-break avec clignotement
+    if (tieBreakAnimationActive) {
+        unsigned long now = millis();
+        if (now - tieBreakAnimationStart >= TIE_BREAK_ANIM_DURATION) {
+            tieBreakAnimationActive = false;
+            drawScore();  // redessine les scores après animation
+        } else if (now - lastTieBreakToggle >= TIE_BREAK_BLINK_INTERVAL) {
+            tieBreakVisible = !tieBreakVisible;
+            lastTieBreakToggle = now;
+            drawScore();
+        }
+    }
+
+    delay(10);
+}
