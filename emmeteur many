@@ -9,7 +9,8 @@ uint8_t receiverMacAddress[] = {0xD4, 0xE9, 0xF4, 0xA5, 0x0B, 0x50};
 #define BTN_TEAM2_PIN 3
 #define BTN_UNDO_PIN  4
 
-#define DEBOUNCE_MS 200   // simple et efficace
+#define DEBOUNCE_MS 200     // simple et efficace
+#define LONG_PRESS_MS 3000  // appui long = 3 secondes
 
 typedef struct {
   int action;
@@ -25,6 +26,11 @@ int lastBtn3 = HIGH;
 unsigned long lastActionTime1 = 0;
 unsigned long lastActionTime2 = 0;
 unsigned long lastActionTime3 = 0;
+
+unsigned long btn1PressStart = 0;
+unsigned long btn3PressStart = 0;
+bool longPressSentBtn1 = false;
+bool longPressSentBtn3 = false;
 
 // -------- CALLBACK --------
 void OnDataSent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
@@ -81,9 +87,24 @@ void loop() {
   int r3 = digitalRead(BTN_UNDO_PIN);
 
   // --- TEAM 1 ---
-  if (lastBtn1 == HIGH && r1 == LOW && (now - lastActionTime1) > DEBOUNCE_MS) {
-    lastActionTime1 = now;
-    sendAction(1);
+  if (r1 == LOW) {
+    if (lastBtn1 == HIGH) {
+      // premier appui détecté
+      btn1PressStart = now;
+      longPressSentBtn1 = false;
+    } else if (!longPressSentBtn1 && (now - btn1PressStart) >= LONG_PRESS_MS) {
+      // appui long détecté
+      sendAction(5);
+      longPressSentBtn1 = true;
+      lastActionTime1 = now; // éviter appui court après
+    }
+  } else {
+    // bouton relâché
+    if (lastBtn1 == LOW && !longPressSentBtn1 && (now - lastActionTime1) > DEBOUNCE_MS) {
+      // appui court
+      lastActionTime1 = now;
+      sendAction(1);
+    }
   }
   lastBtn1 = r1;
 
@@ -94,10 +115,25 @@ void loop() {
   }
   lastBtn2 = r2;
 
-  // --- UNDO ---
-  if (lastBtn3 == HIGH && r3 == LOW && (now - lastActionTime3) > DEBOUNCE_MS) {
-    lastActionTime3 = now;
-    sendAction(3);
+  // --- UNDO (Bouton 3) ---
+  if (r3 == LOW) {
+    if (lastBtn3 == HIGH) {
+      // premier appui détecté
+      btn3PressStart = now;
+      longPressSentBtn3 = false;
+    } else if (!longPressSentBtn3 && (now - btn3PressStart) >= LONG_PRESS_MS) {
+      // appui long détecté
+      sendAction(4);
+      longPressSentBtn3 = true;
+      lastActionTime3 = now; // éviter appui court après
+    }
+  } else {
+    // bouton relâché
+    if (lastBtn3 == LOW && !longPressSentBtn3 && (now - lastActionTime3) > DEBOUNCE_MS) {
+      // appui court
+      lastActionTime3 = now;
+      sendAction(3);
+    }
   }
   lastBtn3 = r3;
 
