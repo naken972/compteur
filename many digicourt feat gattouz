@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <vector>
 
+// -------- MATRICE --------
 #define PANEL_RES_X 64
 #define PANEL_RES_Y 32
 #define PANEL_CHAIN 1
@@ -10,7 +11,22 @@
 HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
 MatrixPanel_I2S_DMA *dma_display;
 
-// ================= SCORE STATE =================
+// -------- ÉTATS DU SYSTÈME --------
+enum SystemState {
+  STATE_GAME,
+  STATE_MENU_GAMES,    // Choix du nombre de jeux (4, 5, 6)
+  STATE_MENU_ADVANTAGE // Choix de la règle d'avantage
+};
+
+SystemState currentState = STATE_GAME;
+
+// -------- CONFIGURATION JEU (Variables) --------
+int configGamesPerSet = 6;    // Par défaut 6 jeux
+int configAdvantageMode = 0;  // 0: Ad, 1: Punto de Oro, 2: 3Ad
+
+const char* advModeNames[] = {"STD", "Punto Oro", "3AD"};
+
+// -------- SCORE DATA --------
 int pointsTeam1_raw = 0;
 int pointsTeam2_raw = 0;
 int gamesTeam1 = 0;
@@ -21,89 +37,260 @@ int currentSetIdx = 0;
 bool advTeam1 = false;
 bool advTeam2 = false;
 bool inTieBreak = false;
-bool tieBreakTriggered = false;
+bool tieBreakTriggered = false; // Pour déclencher l'anim une seule fois
 
-std::vector<int> currentGameActions;
+std::vector<int> currentGameActions; // Historique des points du match
 const char* pointStr[] = {"0", "15", "30", "40"};
 
-// ================= BLINK STATE =================
+// -------- ANIMATIONS / BLINK --------
 bool blinkActive = false;
 unsigned long blinkStartTime = 0;
 unsigned long lastBlinkToggle = 0;
 bool blinkVisible = true;
-int blinkTeam = 0;  // 1 = A, 2 = B
-
-int lastP1 = 0;
+int blinkTeam = 0; 
+int lastP1 = 0; 
 int lastP2 = 0;
 
-#define BLINK_DURATION 3000
-#define BLINK_INTERVAL 300
-
-// ================= TIE-BREAK ANIMATION =================
 bool tieBreakAnimationActive = false;
 unsigned long tieBreakAnimationStart = 0;
-#define TIE_BREAK_ANIM_DURATION 3000
-unsigned long lastTieBreakToggle = 0;
 bool tieBreakVisible = true;
-#define TIE_BREAK_BLINK_INTERVAL 300
+unsigned long lastTieBreakToggle = 0;
 
-// ================= MESSAGE SPECIAL =================
 bool specialMessageActive = false;
 unsigned long specialMessageStart = 0;
-#define SPECIAL_MESSAGE_DURATION 10000  // 5 secondes
+
+// -------- PROTOTYPES --------
+void drawScore();
+void drawMenu();
+void recalcPoints();
+
+// ================= MENUS =================
+void enterMenu() {
+  currentState = STATE_MENU_GAMES;
+  drawMenu();
+}
+
+void nextMenuStep() {
+  if (currentState == STATE_MENU_GAMES) {
+    currentState = STATE_MENU_ADVANTAGE;
+  } else if (currentState == STATE_MENU_ADVANTAGE) {
+    // Fin du menu, on applique et on reset le set en cours si besoin
+    // (Note : changer les règles en plein match recalculera tout l'historique avec les nouvelles règles)
+    currentState = STATE_GAME;
+    recalcPoints();
+  }
+  drawMenu();
+}
+
+void menuAction(int direction) { // +1 ou -1
+  if (currentState == STATE_MENU_GAMES) {
+    configGamesPerSet += direction;
+    if (configGamesPerSet < 1) configGamesPerSet = 1;
+    if (configGamesPerSet > 9) configGamesPerSet = 9;
+  } 
+  else if (currentState == STATE_MENU_ADVANTAGE) {
+    configAdvantageMode += direction;
+    if (configAdvantageMode < 0) configAdvantageMode = 2; // Boucle
+    else if (configAdvantageMode > 2) configAdvantageMode = 0;
+  }
+  drawMenu();
+}
+
+void drawMenu() {
+  dma_display->clearScreen();
+  dma_display->setTextSize(1);
+  dma_display->setTextColor(dma_display->color565(0, 255, 255)); // Jaune
+  
+  if (currentState == STATE_GAME) {
+    drawScore();
+    return;
+  }
+
+  dma_display->setCursor(2, 2);
+  dma_display->print("MENU");
+  
+  dma_display->setTextColor(dma_display->color565(0, 255, 255)); // Cyan
+  dma_display->setCursor(2, 12);
+
+  if (currentState == STATE_MENU_GAMES) {
+    dma_display->print("JEUX/SET:");
+    dma_display->setTextSize(1); // Gros chiffre
+    dma_display->setCursor(0, 22);
+    dma_display->print("> ");
+    dma_display->print(configGamesPerSet);
+  } 
+  else if (currentState == STATE_MENU_ADVANTAGE) {
+    dma_display->print("REGLE AD:");
+    dma_display->setTextSize(1); // Texte normal
+    dma_display->setCursor(0, 22);
+    dma_display->print(">");
+    dma_display->print(advModeNames[configAdvantageMode]);
+  }
+}
+
+// ================= LOGIQUE SERVER =================
+bool computeServer(bool tieBreak, int p1, int p2, int g1, int g2) {
+    int totalGames = g1 + g2;
+    // Note: Cela ne prend pas en compte les sets précédents, 
+    // pour un vrai suivi serveur sur tout le match il faudrait sommer tous les jeux de tous les sets.
+    // Ici simplifié au set courant.
+    bool serverA = (totalGames % 2 == 0); 
+    if (!tieBreak) return serverA;
+    
+    int totalPoints = p1 + p2;
+    if (totalPoints == 0) return serverA;
+    return ((totalPoints - 1) / 2) % 2 == 0 ? !serverA : serverA;
+}
+
+// ================= SCORE ENGINE CORRIGÉ V2 =================
+void recalcPoints() {
+    int p1 = 0, p2 = 0, g1 = 0, g2 = 0;
+    int s1[3] = {0}, s2[3] = {0}, setIdx = 0;
+    bool tieBreak = false;
+    
+    // Compteur d'égalités (40-40) dans le jeu en cours
+    int deuceCountInGame = 0; 
+
+    // --- 1. RECALCUL DE L'HISTORIQUE ---
+    for (int act : currentGameActions) {
+        // On ajoute le point
+        if (act == 1) p1++; else p2++;
+
+        if (tieBreak) {
+            // LOGIQUE TIE BREAK
+            if (p1 >= 7 && p1 - p2 >= 2) { 
+                s1[setIdx] = g1 + 1; s2[setIdx] = g2;
+                g1 = g2 = p1 = p2 = 0; setIdx++; tieBreak = false; 
+            } else if (p2 >= 7 && p2 - p1 >= 2) { 
+                s1[setIdx] = g1; s2[setIdx] = g2 + 1;
+                g1 = g2 = p1 = p2 = 0; setIdx++; tieBreak = false; 
+            }
+        } else {
+            // JEU NORMAL
+            
+            // Détection du 40-40 (Egalité)
+            if (p1 >= 3 && p2 >= 3 && p1 == p2) {
+                deuceCountInGame++;
+            }
+
+            bool gameWon = false;
+            bool isGoldenPoint = false;
+
+            // --- APPLICATION DES REGLES ---
+            if (configAdvantageMode == 1) { 
+                // MODE 1: PUNTO DE ORO (No Ad)
+                // Dès 40-40 (3-3), c'est point décisif
+                if (p1 >= 3 && p2 >= 3) isGoldenPoint = true;
+            } 
+            else if (configAdvantageMode == 2) {
+                // MODE 2: 3AD (2 Ads puis Golden Point)
+                // Au 3ème 40-40 (Count = 3), c'est point décisif
+                if (deuceCountInGame >= 3) isGoldenPoint = true;
+            } 
+
+            if (isGoldenPoint) {
+                // Règle Point en Or : le premier qui mène gagne
+                if (p1 > p2) gameWon = true;
+                else if (p2 > p1) gameWon = true;
+            } else {
+                // Règle Standard (Ecart de 2 points)
+                if (p1 > 3 && p1 >= p2 + 2) gameWon = true;
+                else if (p2 > 3 && p2 >= p1 + 2) gameWon = true;
+            }
+
+            // --- FIN DU JEU ---
+            if (gameWon) {
+                if (p1 > p2) g1++; else g2++;
+                p1 = p2 = 0;
+                deuceCountInGame = 0; // Reset compteur
+            }
+
+            // --- GESTION DES SETS ---
+            if (g1 == configGamesPerSet && g2 == configGamesPerSet) {
+                tieBreak = true;
+            }
+            else if ((g1 >= configGamesPerSet && g1 - g2 >= 2) || g1 == configGamesPerSet + 1) {
+                s1[setIdx]=g1; s2[setIdx]=g2; g1=g2=0; setIdx++;
+            }
+            else if ((g2 >= configGamesPerSet && g2 - g1 >= 2) || g2 == configGamesPerSet + 1) {
+                s1[setIdx]=g1; s2[setIdx]=g2; g1=g2=0; setIdx++;
+            }
+        }
+    }
+
+    // --- 2. GESTION ETAT VISUEL (BLINK) ---
+    if (currentState == STATE_GAME) {
+        if (p1 != lastP1) blinkTeam = 1;
+        else if (p2 != lastP2) blinkTeam = 2;
+        
+        if (p1 != lastP1 || p2 != lastP2) {
+            blinkActive = true; 
+            blinkStartTime = millis(); 
+            lastBlinkToggle = millis();
+            blinkVisible = true;
+        }
+    }
+
+    lastP1 = p1; lastP2 = p2;
+    pointsTeam1_raw = p1; pointsTeam2_raw = p2;
+    gamesTeam1 = g1; gamesTeam2 = g2;
+    currentSetIdx = min(setIdx, 2);
+
+    if (tieBreak && !tieBreakTriggered && currentState == STATE_GAME) {
+        tieBreakTriggered = true;
+        tieBreakAnimationActive = true;
+        tieBreakAnimationStart = millis();
+    }
+    inTieBreak = tieBreak;
+
+    for (int i = 0; i < 3; i++) { setScores1[i] = s1[i]; setScores2[i] = s2[i]; }
+
+    // --- 3. CALCUL AFFICHAGE "Ad" (C'est ici que je corrige) ---
+    
+    // On calcule simplement : est-ce que quelqu'un a l'avantage ?
+    if (!tieBreak) {
+        advTeam1 = (p1 >= 3 && p2 >= 3 && p1 == p2 + 1);
+        advTeam2 = (p2 >= 3 && p1 >= 3 && p2 == p1 + 1);
+    } else {
+        advTeam1 = false;
+        advTeam2 = false;
+    }
+
+    // Si on est exactement sur le point en or (40-40 final), on change la couleur ?
+    // Optionnel : on pourrait utiliser cette info dans drawScore pour mettre le texte en jaune
+    // bool goldenPointActive = (configAdvantageMode == 1 && p1==3 && p2==3) || (configAdvantageMode == 2 && deuceCountInGame >= 3 && p1==p2);
+
+    if (currentState == STATE_GAME) drawScore();
+}
+
+// ================= DISPLAY HELPERS =================
+void drawBall(int x, int y, uint16_t color) {
+    for(int dx=0;dx<3;dx++) for(int dy=0;dy<3;dy++) dma_display->drawPixel(x+dx, y+dy, color);
+}
 
 void drawSpecialMessage() {
     dma_display->clearScreen();
     dma_display->setTextSize(1);
     dma_display->setTextColor(dma_display->color565(0,255,255));
-    int y = PANEL_RES_Y / 2 - 4;
-
-    dma_display->setCursor(16, 7);
-    dma_display->print("GROSSE");
-    dma_display->setCursor(16,17); // 3 px d'écart
-    dma_display->print("MERDE");
+    dma_display->setCursor(16, 7);  dma_display->print("GROSSE");
+    dma_display->setCursor(16, 17); dma_display->print("MERDE");
 }
 
-// ================= SERVER LOGIC =================
-bool computeServer(bool tieBreak, int p1, int p2, int g1, int g2) {
-    int totalGames = g1 + g2;
-    bool serverA = (totalGames % 2 == 0);
-    if (!tieBreak) return serverA;
-
-    int totalPoints = p1 + p2;
-    if (totalPoints == 0) return serverA;
-
-    return ((totalPoints - 1) / 2) % 2 == 0 ? !serverA : serverA;
-}
-
-// ================= SMALL 3x3 BALL =================
-void drawBall(int x, int y, uint16_t color) {
-    for (int dx = 0; dx < 3; dx++)
-        for (int dy = 0; dy < 3; dy++)
-            dma_display->drawPixel(x + dx, y + dy, color);
-}
-
-// ================= TIE BREAK ANIMATION =================
 void drawTieBreakAnimation() {
-    uint16_t color = dma_display->color565(0, 255, 255);
-    if (!tieBreakVisible) return; // clignotement
-    dma_display->setTextSize(1);
-    dma_display->setTextColor(color);
-    int x = (PANEL_RES_X / 2) - 24;
-    int y = (PANEL_RES_Y / 2) - 4;
-    dma_display->setCursor(x, y);
-    dma_display->print("Tie Break");
+    uint16_t c = dma_display->color565(0, 255, 255);
+    if(tieBreakVisible) {
+        dma_display->setCursor(5, 12);
+        dma_display->setTextColor(c);
+        dma_display->print("TIE BREAK");
+    }
 }
 
-void startTieBreakAnimation() {
-    tieBreakAnimationActive = true;
-    tieBreakAnimationStart = millis();
-    lastTieBreakToggle = millis();
-    tieBreakVisible = true;
-}
-
-// ================= DISPLAY =================
+// ================= DISPLAY MAIN =================
 void drawScore() {
+    if (currentState != STATE_GAME) { drawMenu(); return; }
+
+    if (specialMessageActive) { drawSpecialMessage(); return; }
+    
     if (tieBreakAnimationActive) {
         dma_display->clearScreen();
         drawTieBreakAnimation();
@@ -111,200 +298,104 @@ void drawScore() {
     }
 
     dma_display->clearScreen();
-    dma_display->setTextWrap(false);
+    
+    uint16_t c1 = dma_display->color565(255, 0, 0);
+    uint16_t c2 = dma_display->color565(0, 255, 0);
+    bool srvA = computeServer(inTieBreak, pointsTeam1_raw, pointsTeam2_raw, gamesTeam1, gamesTeam2);
 
-    uint16_t colorT1 = dma_display->color565(255, 0, 0);
-    uint16_t colorT2 = dma_display->color565(0, 255, 0);
-
-    bool team1Serving = computeServer(inTieBreak, pointsTeam1_raw, pointsTeam2_raw, gamesTeam1, gamesTeam2);
-
-    String p1, p2;
+    // Textes points
+    String sP1, sP2;
     if (inTieBreak) {
-        p1 = String(pointsTeam1_raw);
-        p2 = String(pointsTeam2_raw);
-    } else if (advTeam1) { p1 = "Ad"; p2 = "40"; }
-    else if (advTeam2) { p1 = "40"; p2 = "Ad"; }
-    else if (pointsTeam1_raw >= 3 && pointsTeam2_raw >= 3) { p1 = "40"; p2 = "40"; }
-    else { p1 = pointStr[pointsTeam1_raw]; p2 = pointStr[pointsTeam2_raw]; }
-
-    // ===== TEAM A =====
-    dma_display->setTextSize(1);
-    dma_display->setTextColor(colorT1);
-    dma_display->setCursor(1, 4);
-    dma_display->print("A");
-
-    for (int i = 0; i < 3; i++) {
-        if (i <= currentSetIdx) {
-            dma_display->setCursor(15 + (i * 9), 4);
-            dma_display->print(i == currentSetIdx ? gamesTeam1 : setScores1[i]);
+        sP1 = String(pointsTeam1_raw); sP2 = String(pointsTeam2_raw);
+    } else {
+        if (advTeam1) { sP1="Ad"; sP2="40"; }
+        else if (advTeam2) { sP1="40"; sP2="Ad"; }
+        else {
+            // Gestion affichage 40-40 spécial
+            if (pointsTeam1_raw >=3 && pointsTeam2_raw >=3) { sP1="40"; sP2="40"; }
+            else { sP1=pointStr[pointsTeam1_raw]; sP2=pointStr[pointsTeam2_raw]; }
         }
     }
 
-    dma_display->setTextSize(2);
-    dma_display->setTextColor(colorT1);
-    int x1 = 40;
-    if (p1.length() == 1) x1 += 6;
+    // -- DRAW TEAM A --
+    dma_display->setTextSize(1); dma_display->setTextColor(c1);
+    dma_display->setCursor(1, 4); dma_display->print("A");
+    for(int i=0; i<3; i++) {
+        if(i<=currentSetIdx) {
+            dma_display->setCursor(15+(i*9), 4);
+            dma_display->print(i==currentSetIdx ? gamesTeam1 : setScores1[i]);
+        }
+    }
+    dma_display->setTextSize(2); 
+    int x1 = 40 + (sP1.length()==1 ? 6:0);
     dma_display->setCursor(x1, 1);
-    if (!blinkActive || blinkTeam != 1 || blinkVisible)
-        dma_display->print(p1);
-    if (team1Serving) drawBall(8, 6, colorT1);
+    if(!blinkActive || blinkTeam!=1 || blinkVisible) dma_display->print(sP1);
+    if(srvA) drawBall(8, 6, c1);
 
-    // ===== TEAM B =====
-    dma_display->setTextSize(1);
-    dma_display->setTextColor(colorT2);
-    dma_display->setCursor(1, 20);
-    dma_display->print("B");
-
-    for (int i = 0; i < 3; i++) {
-        if (i <= currentSetIdx) {
-            dma_display->setCursor(15 + (i * 9), 20);
-            dma_display->print(i == currentSetIdx ? gamesTeam2 : setScores2[i]);
+    // -- DRAW TEAM B --
+    dma_display->setTextSize(1); dma_display->setTextColor(c2);
+    dma_display->setCursor(1, 20); dma_display->print("B");
+    for(int i=0; i<3; i++) {
+        if(i<=currentSetIdx) {
+            dma_display->setCursor(15+(i*9), 20);
+            dma_display->print(i==currentSetIdx ? gamesTeam2 : setScores2[i]);
         }
     }
-
     dma_display->setTextSize(2);
-    dma_display->setTextColor(colorT2);
-    int x2 = 40;
-    if (p2.length() == 1) x2 += 6;
+    int x2 = 40 + (sP2.length()==1 ? 6:0);
     dma_display->setCursor(x2, 17);
-    if (!blinkActive || blinkTeam != 2 || blinkVisible)
-        dma_display->print(p2);
-    if (!team1Serving) drawBall(8, 22, colorT2);
+    if(!blinkActive || blinkTeam!=2 || blinkVisible) dma_display->print(sP2);
+    if(!srvA) drawBall(8, 22, c2);
 }
 
-// ================= RESET =================
-void resetScore() {
-    pointsTeam1_raw = pointsTeam2_raw = 0;
-    gamesTeam1 = gamesTeam2 = 0;
-    currentSetIdx = 0;
-    inTieBreak = false;
-    advTeam1 = false;
-    advTeam2 = false;
-    tieBreakTriggered = false;
-    currentGameActions.clear();
-    blinkActive = false;
-    for (int i = 0; i < 3; i++) {
-        setScores1[i] = 0;
-        setScores2[i] = 0;
-    }
-    drawScore();
-}
-
-// ================= SCORE ENGINE =================
-void recalcPoints() {
-    int p1 = 0, p2 = 0, g1 = 0, g2 = 0;
-    int s1[3] = {0}, s2[3] = {0}, setIdx = 0;
-    bool tieBreak = false;
-
-    for (int act : currentGameActions) {
-        if (act == 1) p1++; else p2++;
-
-        if (tieBreak) {
-            if (p1 >= 7 && p1 - p2 >= 2) { 
-                s1[setIdx] = g1 + 1;
-                s2[setIdx] = g2;
-                g1 = g2 = p1 = p2 = 0; 
-                setIdx++; 
-                tieBreak = false; 
-            } else if (p2 >= 7 && p2 - p1 >= 2) { 
-                s1[setIdx] = g1;
-                s2[setIdx] = g2 + 1;
-                g1 = g2 = p1 = p2 = 0; 
-                setIdx++; 
-                tieBreak = false; 
-            }
-        } else {
-            if (p1 > 3 && p1 >= p2 + 2) { g1++; p1=p2=0; }
-            else if (p2 > 3 && p2 >= p1 + 2) { g2++; p1=p2=0; }
-
-            if (g1 == 6 && g2 == 6) tieBreak = true;
-            else if ((g1 >= 6 && g1 - g2 >= 2) || g1 == 7) { s1[setIdx]=g1; s2[setIdx]=g2; g1=g2=0; setIdx++; }
-            else if ((g2 >= 6 && g2 - g1 >= 2) || g2 == 7) { s1[setIdx]=g1; s2[setIdx]=g2; g1=g2=0; setIdx++; }
-        }
-    }
-
-    if (p1 != lastP1) blinkTeam = 1;
-    else if (p2 != lastP2) blinkTeam = 2;
-
-    if (p1 != lastP1 || p2 != lastP2) {
-        blinkActive = true;
-        blinkStartTime = millis();
-        lastBlinkToggle = millis();
-        blinkVisible = true;
-    }
-
-    lastP1 = p1;
-    lastP2 = p2;
-
-    pointsTeam1_raw = p1;
-    pointsTeam2_raw = p2;
-    gamesTeam1 = g1;
-    gamesTeam2 = g2;
-    currentSetIdx = min(setIdx, 2);
-
-    if (tieBreak && !tieBreakTriggered) {
-        tieBreakTriggered = true;
-        startTieBreakAnimation();
-    }
-
-    inTieBreak = tieBreak;
-
-    for (int i = 0; i < 3; i++) {
-        setScores1[i] = s1[i];
-        setScores2[i] = s2[i];
-    }
-
-    advTeam1 = (!tieBreak && p1 >= 3 && p2 >= 3 && p1 == p2 + 1);
-    advTeam2 = (!tieBreak && p2 >= 3 && p1 >= 3 && p2 == p1 + 1);
-
-    drawScore();
-}
-
-// ================= BLINK UPDATE =================
-void updateBlink() {
-    if (!blinkActive) return;
-
-    unsigned long now = millis();
-
-    if (now - blinkStartTime >= BLINK_DURATION) {
-        blinkActive = false;
-        blinkVisible = true;
-        drawScore();
-        return;
-    }
-
-    if (now - lastBlinkToggle >= BLINK_INTERVAL) {
-        blinkVisible = !blinkVisible;
-        lastBlinkToggle = now;
-        drawScore();
-    }
-}
-
-// ================= API =================
-void scorePoint(int team){ currentGameActions.push_back(team); recalcPoints(); }
-void undoLast(){ if(!currentGameActions.empty()){ currentGameActions.pop_back(); recalcPoints(); }}
-
-// ================= ESP NOW =================
+// ================= COMMS =================
 typedef struct struct_message { int action; } struct_message;
 struct_message incomingData;
 
-void onReceive(const esp_now_recv_info *info, const uint8_t *data, int len){
+void scorePoint(int t) { currentGameActions.push_back(t); recalcPoints(); }
+void undoLast() { if(!currentGameActions.empty()){ currentGameActions.pop_back(); recalcPoints(); }}
+void resetAll() { 
+    currentGameActions.clear(); 
+    tieBreakTriggered=false; 
+    tieBreakAnimationActive=false; 
+    recalcPoints(); 
+}
+
+void onReceive(const esp_now_recv_info *info, const uint8_t *data, int len) {
     memcpy(&incomingData, data, sizeof(incomingData));
-    switch(incomingData.action){
-        case 1: scorePoint(1); break;
-        case 2: scorePoint(2); break;
-        case 3: undoLast(); break;
-        case 4: resetScore(); break;
-        case 5: // appui long bouton 1
-            specialMessageActive = true;
-            specialMessageStart = millis();
-            drawSpecialMessage();
-            break;
+    int act = incomingData.action;
+
+    if (act == 6) { 
+        // Signal MENU (Appui long Btn 2)
+        if (currentState == STATE_GAME) enterMenu();
+        else { currentState = STATE_GAME; drawMenu(); } // Sortie d'urgence du menu
+        return; 
+    }
+
+    if (currentState != STATE_GAME) {
+        // --- NAVIGATION MENU ---
+        if (act == 1) menuAction(1);       // Btn 1: + / Suivant
+        else if (act == 3) menuAction(-1); // Btn 3: - / Précédent
+        else if (act == 2) nextMenuStep(); // Btn 2: Valider
+    } else {
+        // --- JEU NORMAL ---
+        switch(act) {
+            case 1: scorePoint(1); break;
+            case 2: scorePoint(2); break;
+            case 3: undoLast(); break;
+            case 4: resetAll(); break;
+            case 5: 
+                specialMessageActive = true; 
+                specialMessageStart = millis(); 
+                drawScore(); 
+                break;
+        }
     }
 }
 
 // ================= SETUP / LOOP =================
-void setup(){
+void setup() {
+    // Config Matrix (A ajuster selon ton câblage)
     mxconfig.gpio.r1=18; mxconfig.gpio.g1=25; mxconfig.gpio.b1=5;
     mxconfig.gpio.r2=22; mxconfig.gpio.g2=33; mxconfig.gpio.b2=16;
     mxconfig.gpio.a=4; mxconfig.gpio.b=3; mxconfig.gpio.c=0;
@@ -319,30 +410,37 @@ void setup(){
     esp_now_init();
     esp_now_register_recv_cb(onReceive);
 
-    recalcPoints();
+    recalcPoints(); // Affiche le score initial (0-0)
 }
 
-void loop(){
-    updateBlink();
+void loop() {
+    unsigned long now = millis();
 
-    // Animation tie-break
+    // 1. Gestion message spécial (Grosse Merde)
+    if (specialMessageActive && now - specialMessageStart > 5000) {
+        specialMessageActive = false;
+        drawScore();
+    }
+
+    // 2. Anim Tie Break
     if (tieBreakAnimationActive) {
-        unsigned long now = millis();
-        if (now - tieBreakAnimationStart >= TIE_BREAK_ANIM_DURATION) {
+        if (now - tieBreakAnimationStart > 3000) {
             tieBreakAnimationActive = false;
             drawScore();
-        } else if (now - lastTieBreakToggle >= TIE_BREAK_BLINK_INTERVAL) {
+        } else if (now - lastTieBreakToggle > 300) {
             tieBreakVisible = !tieBreakVisible;
             lastTieBreakToggle = now;
             drawScore();
         }
     }
 
-    // Effacement automatique du message spécial après 5s
-    if (specialMessageActive && millis() - specialMessageStart >= SPECIAL_MESSAGE_DURATION) {
-        specialMessageActive = false;
-        drawScore();
+    // 3. Blink des points
+    if (blinkActive && currentState == STATE_GAME) {
+        if (now - blinkStartTime > 3000) {
+            blinkActive = false; blinkVisible = true; drawScore();
+        } else if (now - lastBlinkToggle > 300) {
+            blinkVisible = !blinkVisible; lastBlinkToggle = now; drawScore();
+        }
     }
-
     delay(10);
 }
