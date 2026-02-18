@@ -1,0 +1,118 @@
+#include <esp_now.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <esp_sleep.h>
+
+// -------- CONFIG --------
+uint8_t receiverMacAddress[] = {0xD4, 0xE9, 0xF4, 0xA5, 0x0B, 0x50};
+
+#define BTN_TEAM1_PIN 2
+#define BTN_TEAM2_PIN 3
+#define BTN_UNDO_PIN  4
+
+#define DEBOUNCE_MS   200
+#define LONG_PRESS_MS 3000
+
+typedef struct {
+  int action;
+} struct_message;
+
+struct_message myData;
+bool envoyé = false;
+
+// -------- CALLBACK --------
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Envoyé ✅" : "Échec ❌");
+  envoyé = true;
+}
+
+// -------- SEND --------
+void sendAction(int action) {
+  Serial.print("Action ");
+  Serial.print(action);
+  Serial.println(" envoyée");
+  envoyé = false;
+  myData.action = action;
+  esp_now_send(receiverMacAddress, (uint8_t*)&myData, sizeof(myData));
+  // Attendre confirmation max 500ms
+  unsigned long t = millis();
+  while (!envoyé && millis() - t < 500);
+}
+
+// -------- HANDLE BUTTON --------
+// Gère appui court ET long pour un bouton donné
+// actionShort / actionLong : -1 = pas d'appui long pour ce bouton
+void handleButton(int pin, int actionShort, int actionLong) {
+  unsigned long pressStart = millis();
+  bool longSent = false;
+
+  // Attendre relâchement ou appui long
+  while (digitalRead(pin) == LOW) {
+    if (actionLong != -1 && !longSent && (millis() - pressStart) >= LONG_PRESS_MS) {
+      sendAction(actionLong);
+      longSent = true;
+    }
+    delay(10);
+  }
+
+  // Appui court si pas d'appui long
+  if (!longSent && (millis() - pressStart) >= DEBOUNCE_MS) {
+    sendAction(actionShort);
+  }
+}
+
+// -------- SETUP --------
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+  setCpuFrequencyMhz(80);
+
+  pinMode(BTN_TEAM1_PIN, INPUT_PULLUP);
+  pinMode(BTN_TEAM2_PIN, INPUT_PULLUP);
+  pinMode(BTN_UNDO_PIN,  INPUT_PULLUP);
+
+  // Init ESP-NOW
+  WiFi.mode(WIFI_STA);
+  btStop();
+  esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+  esp_now_init();
+  esp_now_register_send_cb(OnDataSent);
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, receiverMacAddress, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  esp_now_add_peer(&peerInfo);
+
+  // -------- IDENTIFIER LE BOUTON PRESSÉ --------
+  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+
+  if (cause == ESP_SLEEP_WAKEUP_GPIO || cause == ESP_SLEEP_WAKEUP_UNDEFINED) {
+    // ESP_SLEEP_WAKEUP_UNDEFINED = premier démarrage, on vérifie quand même
+    delay(DEBOUNCE_MS); // anti-rebond initial
+
+    if (digitalRead(BTN_TEAM1_PIN) == LOW) {
+      handleButton(BTN_TEAM1_PIN, 1, 5); // court=1, long=5
+    } else if (digitalRead(BTN_TEAM2_PIN) == LOW) {
+      handleButton(BTN_TEAM2_PIN, 2, -1); // court=2, pas d'appui long
+    } else if (digitalRead(BTN_UNDO_PIN) == LOW) {
+      handleButton(BTN_UNDO_PIN, 3, 4);  // court=3, long=4
+    }
+  }
+
+  // -------- RETOUR EN DEEP SLEEP --------
+  Serial.println("Deep sleep...");
+  Serial.flush();
+
+  esp_deep_sleep_enable_gpio_wakeup(
+    (1ULL << BTN_TEAM1_PIN) | (1ULL << BTN_TEAM2_PIN) | (1ULL << BTN_UNDO_PIN),
+    ESP_GPIO_WAKEUP_GPIO_LOW
+  );
+
+  esp_deep_sleep_start();
+}
+
+// -------- LOOP --------
+void loop() {
+  // Jamais atteint
+}
