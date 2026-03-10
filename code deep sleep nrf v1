@@ -2,90 +2,106 @@
 #include "nrf_gpio.h"
 
 // ── Pins boutons ──────────────────────────────────────────────────────────────
-#define BTN1 D0
-#define BTN2 D1
-#define BTN3 D2
+#define BTN1 D0 // Team 1
+#define BTN2 D1 // Team 2
+#define BTN3 D2 // Undo
 
-// Fonction pour diffuser le signal très rapidement
+#define LONG_PRESS_MS 2000 // 3 secondes
+
 void majBLE(uint8_t code) {
   Bluefruit.Advertising.stop();
   Bluefruit.Advertising.clearData();
   Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
   Bluefruit.Advertising.addName();
   Bluefruit.Advertising.addData(BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, &code, 1);
-  Bluefruit.Advertising.setInterval(32, 32); // 20ms
+  Bluefruit.Advertising.setInterval(32, 32); // Ultra rapide (20ms)
   Bluefruit.Advertising.start(0);
 }
 
 void setup() {
-  // =====================================================================
-  // ASTUCE MAGIQUE 1 : LA MÉMOIRE MATÉRIELLE
-  // On lit le registre LATCH qui "se souvient" du pin qui a réveillé la carte
-  // =====================================================================
+  // 1. Lire la mémoire matérielle (Quel bouton a réveillé la carte ?)
   uint32_t latch = NRF_P0->LATCH;
-  NRF_P0->LATCH = latch; // On efface la mémoire pour le prochain réveil
+  NRF_P0->LATCH = latch; // Effacer pour le prochain réveil
 
   pinMode(BTN1, INPUT_PULLUP);
   pinMode(BTN2, INPUT_PULLUP);
   pinMode(BTN3, INPUT_PULLUP);
 
-  uint8_t code = 0;
-  
-  // On regarde si le bouton est pressé ACTUELLEMENT, ou s'il ÉTAIT pressé (via LATCH)
-  if      (!digitalRead(BTN1) || (latch & (1 << g_ADigitalPinMap[BTN1]))) code = 1;
-  else if (!digitalRead(BTN2) || (latch & (1 << g_ADigitalPinMap[BTN2]))) code = 2;
-  else if (!digitalRead(BTN3) || (latch & (1 << g_ADigitalPinMap[BTN3]))) code = 3;
-
-  // On lance le Bluetooth
   Bluefruit.begin();
-  Bluefruit.setTxPower(4); 
+  Bluefruit.setTxPower(4);
   Bluefruit.setName("NRF_BTN");
-  Bluefruit.autoConnLed(false);
-  
-  // Si un bouton a été détecté
-  if (code != 0) {
-    majBLE(code); // On envoie l'appui (Ex: 1)
-    
-    // =====================================================================
-    // ASTUCE MAGIQUE 2 : LE TEMPS MINIMUM D'ÉMISSION
-    // On force la carte à envoyer ce code pendant au moins 400ms.
-    // Cela garantit que l'ESP32 va le capter, même si le "clic" a duré 10ms !
-    // =====================================================================
-    delay(400); 
+  Bluefruit.autoConnLed(false); // On coupe la LED bleue pour la batterie
 
-    // SI le doigt est ENCORE sur le bouton après ces 400ms, on attend le relâchement
+  // 2. Identifier le bouton actif
+  uint8_t activeBtn = 0;
+  if      (!digitalRead(BTN1) || (latch & (1 << g_ADigitalPinMap[BTN1]))) activeBtn = 1;
+  else if (!digitalRead(BTN2) || (latch & (1 << g_ADigitalPinMap[BTN2]))) activeBtn = 2;
+  else if (!digitalRead(BTN3) || (latch & (1 << g_ADigitalPinMap[BTN3]))) activeBtn = 3;
+
+  // 3. Logique de traitement selon le bouton
+  if (activeBtn != 0) {
     uint32_t t0 = millis();
-    while (!digitalRead(BTN1) || !digitalRead(BTN2) || !digitalRead(BTN3)) {
-      delay(10);
-      if (millis() - t0 > 3000) break; // Sécurité si coincé
+
+    // ==========================================
+    // BOUTON 2 (Team 2) : Action immédiate
+    // ==========================================
+    if (activeBtn == 2) {
+      majBLE(2);  // On envoie le code 2
+      delay(400); // Temps garanti pour l'ESP32
+      
+      // On attend que l'utilisateur lâche le bouton
+      while (!digitalRead(BTN2)) { delay(10); } 
+    }
+    // ==========================================
+    // BOUTON 1 & 3 : Détection Court / Long
+    // ==========================================
+    else {
+      uint32_t currentPin = (activeBtn == 1) ? BTN1 : BTN3;
+      bool longPressTriggered = false;
+
+      // On boucle tant que le bouton est enfoncé
+      while (!digitalRead(currentPin)) {
+        
+        // Si on atteint les 3 secondes d'appui
+        if (millis() - t0 >= LONG_PRESS_MS) {
+          uint8_t longCode = (activeBtn == 1) ? 5 : 4; // 5 pour BTN1, 4 pour BTN3
+          majBLE(longCode);
+          longPressTriggered = true;
+          delay(400); // Temps garanti pour l'ESP32
+          
+          // On attend la fin du relâchement physique
+          while (!digitalRead(currentPin)) { delay(10); } 
+          break; // On sort de la boucle principale
+        }
+        delay(10);
+      }
+
+      // Si le bouton a été relâché AVANT les 3 secondes (Appui Court)
+      if (!longPressTriggered) {
+        uint8_t shortCode = (activeBtn == 1) ? 1 : 3; // 1 pour BTN1, 3 pour BTN3
+        majBLE(shortCode); // On envoie le code court AU RELÂCHEMENT
+        delay(400);        // On force le BLE pendant 400ms pour que l'ESP32 le capte !
+      }
     }
   }
 
-  // On dit à l'ESP32 "C'est relâché"
-  majBLE(0); 
-  
-  // On laisse 300ms à l'ESP32 pour bien recevoir ce "0"
-  delay(300); 
+  // 4. Signal de fin "Tout est relâché"
+  majBLE(0);
+  delay(300);
 
-  // ── Préparation au Deep Sleep ─────────────────────────────────────────────
+  // 5. Mode Deep Sleep
   Bluefruit.Advertising.stop();
-  
   pinMode(BTN1, INPUT);
   pinMode(BTN2, INPUT);
   pinMode(BTN3, INPUT);
 
-  // Configurer le réveil sur front bas (connexion au GND)
   uint32_t hwPins[3] = {g_ADigitalPinMap[BTN1], g_ADigitalPinMap[BTN2], g_ADigitalPinMap[BTN3]};
   for (int i = 0; i < 3; i++) {
     nrf_gpio_cfg_sense_input(hwPins[i], NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
   }
 
   sd_softdevice_disable();
-
-  // ── Dodo absolu (~0.4µA) ──────────────────────────────────────────────────
   NRF_POWER->SYSTEMOFF = 1;
 }
 
-void loop() {
-  // Vide
-}
+void loop() {}
