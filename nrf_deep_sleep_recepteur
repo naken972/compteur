@@ -1,0 +1,82 @@
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+
+// Configuration de la cible
+String targetMac = "fb:99:0c:78:cd:69";
+uint8_t dernierEtat = 255; 
+
+// Objet de scan global
+BLEScan* pBLEScan;
+
+// --- CALLBACK : Gestion de la détection ---
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+    void onResult(BLEAdvertisedDevice advertisedDevice) {
+      // Conversion de l'adresse en String pour la comparaison
+      String currentAddr = advertisedDevice.getAddress().toString().c_str();
+      
+      if (currentAddr.equalsIgnoreCase(targetMac)) {
+        if (advertisedDevice.haveManufacturerData()) {
+          
+          // SOLUTION À L'ERREUR : On utilise String directement
+          String mfgData = advertisedDevice.getManufacturerData();
+          
+          int len = mfgData.length();
+          if (len > 0) {
+            // On récupère le dernier caractère (octet) de la String
+            uint8_t boutonCode = (uint8_t)mfgData[len - 1];
+            
+            // On n'affiche que si l'état a changé pour éviter le flood
+            if (boutonCode != dernierEtat) {
+              dernierEtat = boutonCode;
+              
+              Serial.print("[XIAO DÉTECTÉ] -> État : ");
+              if (boutonCode == 0) {
+                Serial.println("RELEASE (Aucun bouton)");
+              } else if (boutonCode == 1) {
+                Serial.println("🟢 BOUTON 1 APPUYÉ (D0)");
+              } else if (boutonCode == 2) {
+                Serial.println("🔵 BOUTON 2 APPUYÉ (D1)");
+              } else if (boutonCode == 3) {
+                Serial.println("🔴 BOUTON 3 APPUYÉ (D2)");
+              }
+            }
+          }
+        }
+      }
+    }
+};
+
+// --- CALLBACK : Relance automatique du scan ---
+// Cette fonction permet de ne jamais arrêter l'écoute
+void scanEndedCB(BLEScanResults results) {
+    pBLEScan->start(0, scanEndedCB, false);
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Système de réception ultra-réactif...");
+
+  BLEDevice::init("");
+  pBLEScan = BLEDevice::getScan(); 
+  
+  // 'true' ici est crucial : il permet de recevoir TOUS les paquets même les doublons
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks(), true);
+  
+  pBLEScan->setActiveScan(true); 
+  
+  // CONFIGURATION DU SCAN CONTINU (100% du temps)
+  pBLEScan->setInterval(100);
+  pBLEScan->setWindow(100);  
+  
+  Serial.println("Scan permanent lancé.");
+  
+  // Lancement infini (0) avec rappel (scanEndedCB)
+  pBLEScan->start(0, scanEndedCB, false);
+}
+
+void loop() {
+  // Rien ici, tout est géré par les interruptions du contrôleur BLE
+  delay(1000); 
+}
