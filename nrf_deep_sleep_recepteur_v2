@@ -1,0 +1,276 @@
+#include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+#include <vector>
+
+// -------- CONFIGURATION MATRICE --------
+#define PANEL_RES_X 64
+#define PANEL_RES_Y 32
+#define PANEL_CHAIN 1
+
+HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
+MatrixPanel_I2S_DMA *dma_display;
+
+// -------- CONFIGURATION BLE --------
+String targetMac = "fb:99:0c:78:cd:69";
+uint8_t dernierEtat = 255; 
+BLEScan* pBLEScan;
+
+// -------- ÉTATS DU SYSTÈME --------
+enum SystemState { STATE_BOOT, STATE_GAME, STATE_MENU_GAMES, STATE_MENU_ADVANTAGE };
+SystemState currentState = STATE_BOOT;
+
+// -------- CONFIGURATION JEU --------
+int configGamesPerSet = 6;
+int configAdvantageMode = 0; // 0: Ad, 1: Punto de Oro, 2: 3Ad
+const char* advModeNames[] = {"STD", "Punto Oro", "3AD"};
+
+// -------- SCORE DATA --------
+int pointsTeam1_raw = 0, pointsTeam2_raw = 0;
+int gamesTeam1 = 0, gamesTeam2 = 0;
+int setScores1[3] = {0}, setScores2[3] = {0};
+int currentSetIdx = 0;
+bool advTeam1 = false, advTeam2 = false;
+bool inTieBreak = false;
+bool tieBreakTriggered = false;
+
+std::vector<int> currentGameActions;
+const char* pointStr[] = {"0", "15", "30", "40"};
+
+// -------- ANIMATIONS / TIMERS --------
+bool blinkActive = false;
+unsigned long blinkStartTime = 0, lastBlinkToggle = 0;
+bool blinkVisible = true;
+int blinkTeam = 0, lastP1 = 0, lastP2 = 0;
+
+bool tieBreakAnimationActive = false;
+unsigned long tieBreakAnimationStart = 0, lastTieBreakToggle = 0;
+bool tieBreakVisible = true;
+
+bool specialMessageActive = false;
+unsigned long specialMessageStart = 0;
+
+// -------- PROTOTYPES --------
+void drawScore();
+void drawMenu();
+void recalcPoints();
+
+// ================= LOGIQUE ACTION =================
+void handleAction(int act) {
+    if (act == 0) return; // Release bouton
+
+    if (act == 6) { // Appui long Menu
+        if (currentState == STATE_GAME) currentState = STATE_MENU_GAMES;
+        else currentState = STATE_GAME;
+        drawMenu();
+        return;
+    }
+
+    if (currentState != STATE_GAME) {
+        if (act == 1) { 
+            if (currentState == STATE_MENU_GAMES) configGamesPerSet = (configGamesPerSet >= 9) ? 1 : configGamesPerSet + 1;
+            else configAdvantageMode = (configAdvantageMode + 1) % 3;
+        } 
+        else if (act == 3) { 
+            if (currentState == STATE_MENU_GAMES) configGamesPerSet = (configGamesPerSet <= 1) ? 9 : configGamesPerSet - 1;
+            else configAdvantageMode = (configAdvantageMode + 2) % 3;
+        }
+        else if (act == 2) { 
+            if (currentState == STATE_MENU_GAMES) currentState = STATE_MENU_ADVANTAGE;
+            else { currentState = STATE_GAME; recalcPoints(); }
+        }
+        drawMenu();
+    } else {
+        switch(act) {
+            case 1: currentGameActions.push_back(1); recalcPoints(); break;
+            case 2: currentGameActions.push_back(2); recalcPoints(); break;
+            case 3: if(!currentGameActions.empty()){ currentGameActions.pop_back(); recalcPoints(); } break;
+            case 4: currentGameActions.clear(); tieBreakTriggered = false; recalcPoints(); break;
+            case 5: specialMessageActive = true; specialMessageStart = millis(); drawScore(); break;
+        }
+    }
+}
+
+// ================= CALLBACKS BLE =================
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+    void onResult(BLEAdvertisedDevice advertisedDevice) {
+        if (advertisedDevice.getAddress().toString() == targetMac.c_str()) {
+            if (advertisedDevice.haveManufacturerData()) {
+                // Utilisation de String Arduino pour éviter les erreurs de type std::string
+                String mfgData = advertisedDevice.getManufacturerData();
+                int len = mfgData.length();
+                if (len > 0) {
+                    uint8_t boutonCode = (uint8_t)mfgData[len - 1];
+                    if (boutonCode != dernierEtat) {
+                        dernierEtat = boutonCode;
+                        handleAction(boutonCode);
+                    }
+                }
+            }
+        }
+    }
+};
+
+void scanEndedCB(BLEScanResults results) {
+    pBLEScan->start(0, scanEndedCB, false);
+}
+
+// ================= LOGIQUE TENNIS =================
+void recalcPoints() {
+    int p1 = 0, p2 = 0, g1 = 0, g2 = 0;
+    int s1[3] = {0}, s2[3] = {0}, setIdx = 0;
+    bool tieBreak = false;
+    int deuceCount = 0;
+
+    for (int act : currentGameActions) {
+        if (act == 1) p1++; else p2++;
+        if (tieBreak) {
+            if (p1 >= 7 && p1 - p2 >= 2) { s1[setIdx]=g1+1; s2[setIdx]=g2; g1=g2=p1=p2=0; setIdx++; tieBreak=false; }
+            else if (p2 >= 7 && p2 - p1 >= 2) { s1[setIdx]=g1; s2[setIdx]=g2+1; g1=g2=p1=p2=0; setIdx++; tieBreak=false; }
+        } else {
+            if (p1 >= 3 && p2 >= 3 && p1 == p2) deuceCount++;
+            bool gameWon = false;
+            bool gold = (configAdvantageMode == 1 && p1 >= 3 && p2 >= 3) || (configAdvantageMode == 2 && deuceCount >= 3);
+            if (gold) { if (p1 > p2 || p2 > p1) gameWon = true; }
+            else { if ((p1 > 3 && p1 >= p2 + 2) || (p2 > 3 && p2 >= p1 + 2)) gameWon = true; }
+            if (gameWon) {
+                if (p1 > p2) g1++; else g2++;
+                p1 = p2 = 0; deuceCount = 0;
+                if (g1 == configGamesPerSet && g2 == configGamesPerSet) tieBreak = true;
+                else if ((g1 >= configGamesPerSet && g1 - g2 >= 2) || g1 == configGamesPerSet + 1) { s1[setIdx]=g1; s2[setIdx]=g2; g1=g2=0; setIdx++; }
+                else if ((g2 >= configGamesPerSet && g2 - g1 >= 2) || g2 == configGamesPerSet + 1) { s1[setIdx]=g1; s2[setIdx]=g2; g1=g2=0; setIdx++; }
+            }
+        }
+    }
+
+    if (currentState == STATE_GAME) {
+        if (p1 != lastP1) blinkTeam = 1; else if (p2 != lastP2) blinkTeam = 2;
+        if (p1 != lastP1 || p2 != lastP2) { blinkActive = true; blinkStartTime = millis(); lastBlinkToggle = millis(); blinkVisible = true; }
+    }
+    lastP1 = p1; lastP2 = p2; pointsTeam1_raw = p1; pointsTeam2_raw = p2;
+    gamesTeam1 = g1; gamesTeam2 = g2; currentSetIdx = (setIdx > 2) ? 2 : setIdx;
+    for (int i=0; i<3; i++) { setScores1[i] = s1[i]; setScores2[i] = s2[i]; }
+
+    if (tieBreak && !tieBreakTriggered && currentState == STATE_GAME) {
+        tieBreakTriggered = true; tieBreakAnimationActive = true; tieBreakAnimationStart = millis();
+    } else if (!tieBreak) tieBreakTriggered = false;
+
+    inTieBreak = tieBreak;
+    advTeam1 = (!tieBreak && p1 >= 3 && p2 >= 3 && p1 == p2 + 1);
+    advTeam2 = (!tieBreak && p2 >= 3 && p1 >= 3 && p2 == p1 + 1);
+    if (currentState == STATE_GAME) drawScore();
+}
+
+// ================= AFFICHAGE =================
+void drawBall(int x, int y, uint16_t color) { dma_display->fillRect(x, y, 3, 3, color); }
+
+bool computeServer(bool tieBreak, int p1, int p2, int g1, int g2) {
+    int totalGames = g1 + g2;
+    bool serverA = (totalGames % 2 == 0);
+    if (!tieBreak) return serverA;
+    return (((p1 + p2) - 1) / 2) % 2 == 0 ? !serverA : serverA;
+}
+
+void drawScore() {
+    if (specialMessageActive) {
+        dma_display->clearScreen();
+        dma_display->setTextSize(1);
+        dma_display->setCursor(16, 7); dma_display->print("GROSSE");
+        dma_display->setCursor(16, 17); dma_display->print("MERDE");
+        return;
+    }
+    if (tieBreakAnimationActive) {
+        dma_display->clearScreen();
+        dma_display->setTextSize(1);
+        if (tieBreakVisible) { dma_display->setCursor(5, 12); dma_display->print("TIE BREAK"); }
+        return;
+    }
+
+    dma_display->clearScreen();
+    uint16_t c1 = dma_display->color565(255, 0, 0);
+    uint16_t c2 = dma_display->color565(0, 255, 0);
+    bool srvA = computeServer(inTieBreak, pointsTeam1_raw, pointsTeam2_raw, gamesTeam1, gamesTeam2);
+
+    String sP1 = inTieBreak ? String(pointsTeam1_raw) : (advTeam1 ? "Ad" : (pointsTeam1_raw >= 3 && pointsTeam2_raw >= 3 ? "40" : pointStr[pointsTeam1_raw]));
+    String sP2 = inTieBreak ? String(pointsTeam2_raw) : (advTeam2 ? "Ad" : (pointsTeam1_raw >= 3 && pointsTeam2_raw >= 3 ? "40" : pointStr[pointsTeam2_raw]));
+
+    dma_display->setTextSize(1);
+    dma_display->setTextColor(c1); dma_display->setCursor(1, 4); dma_display->print("A");
+    for(int i=0; i<=currentSetIdx; i++) { dma_display->setCursor(15+(i*9), 4); dma_display->print(i==currentSetIdx ? gamesTeam1 : setScores1[i]); }
+    dma_display->setTextSize(2); dma_display->setCursor(40 + (sP1.length()==1?6:0), 1);
+    if(!blinkActive || blinkTeam!=1 || blinkVisible) dma_display->print(sP1);
+    if(srvA) drawBall(8, 6, c1);
+
+    dma_display->setTextSize(1);
+    dma_display->setTextColor(c2); dma_display->setCursor(1, 20); dma_display->print("B");
+    for(int i=0; i<=currentSetIdx; i++) { dma_display->setCursor(15+(i*9), 20); dma_display->print(i==currentSetIdx ? gamesTeam2 : setScores2[i]); }
+    dma_display->setTextSize(2); dma_display->setCursor(40 + (sP2.length()==1?6:0), 17);
+    if(!blinkActive || blinkTeam!=2 || blinkVisible) dma_display->print(sP2);
+    if(!srvA) drawBall(8, 22, c2);
+}
+
+void drawMenu() {
+    dma_display->clearScreen();
+    dma_display->setTextSize(1); dma_display->setTextColor(dma_display->color565(255, 255, 0));
+    dma_display->setCursor(2, 2); dma_display->print("MENU");
+    dma_display->setCursor(0, 22); dma_display->print("> ");
+    if (currentState == STATE_MENU_GAMES) {
+        dma_display->setCursor(2, 12); dma_display->print("JEUX/SET: "); dma_display->print(configGamesPerSet);
+    } else {
+        dma_display->setCursor(2, 12); dma_display->print("REGLE AD: "); dma_display->print(advModeNames[configAdvantageMode]);
+    }
+}
+
+// ================= SETUP & LOOP =================
+void setup() {
+    // Config Pins Matrice
+    mxconfig.gpio.r1=18; mxconfig.gpio.g1=25; mxconfig.gpio.b1=5;
+    mxconfig.gpio.r2=22; mxconfig.gpio.g2=33; mxconfig.gpio.b2=16;
+    mxconfig.gpio.a=4; mxconfig.gpio.b=3; mxconfig.gpio.c=0;
+    mxconfig.gpio.d=21; mxconfig.gpio.e=32;
+    mxconfig.gpio.lat=19; mxconfig.gpio.oe=15; mxconfig.gpio.clk=2;
+
+    dma_display = new MatrixPanel_I2S_DMA(mxconfig);
+    dma_display->begin();
+    dma_display->setBrightness8(150);
+
+    // Splash Screen
+    dma_display->clearScreen();
+    dma_display->setTextColor(dma_display->color565(0, 255, 255));
+    dma_display->setCursor(5, 12); dma_display->print("DIGICOURT");
+
+    // BLE Init
+    BLEDevice::init("DIGICOURT_RCV");
+    pBLEScan = BLEDevice::getScan();
+    pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks(), true);
+    pBLEScan->setActiveScan(true);
+    pBLEScan->setInterval(100);
+    pBLEScan->setWindow(100);
+    pBLEScan->start(0, scanEndedCB, false);
+}
+
+void loop() {
+    unsigned long now = millis();
+
+    // Boot Delay
+    if (currentState == STATE_BOOT && now > 4000) { currentState = STATE_GAME; recalcPoints(); }
+
+    // Message spécial
+    if (specialMessageActive && now - specialMessageStart > 5000) { specialMessageActive = false; drawScore(); }
+
+    // Animations Tie Break
+    if (tieBreakAnimationActive) {
+        if (now - tieBreakAnimationStart > 3000) { tieBreakAnimationActive = false; drawScore(); }
+        else if (now - lastTieBreakToggle > 300) { tieBreakVisible = !tieBreakVisible; lastTieBreakToggle = now; drawScore(); }
+    }
+
+    // Clignotement des points
+    if (blinkActive && currentState == STATE_GAME) {
+        if (now - blinkStartTime > 3000) { blinkActive = false; blinkVisible = true; drawScore(); }
+        else if (now - lastBlinkToggle > 300) { blinkVisible = !blinkVisible; lastBlinkToggle = now; drawScore(); }
+    }
+    
+    delay(10);
+}
