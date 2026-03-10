@@ -6,7 +6,7 @@
 #define BTN2 D1 // Team 2
 #define BTN3 D2 // Undo
 
-#define LONG_PRESS_MS 2000 // 3 secondes
+#define LONG_PRESS_MS 3000 // 3 secondes
 
 void majBLE(uint8_t code) {
   Bluefruit.Advertising.stop();
@@ -38,50 +38,47 @@ void setup() {
   else if (!digitalRead(BTN2) || (latch & (1 << g_ADigitalPinMap[BTN2]))) activeBtn = 2;
   else if (!digitalRead(BTN3) || (latch & (1 << g_ADigitalPinMap[BTN3]))) activeBtn = 3;
 
-  // 3. Logique de traitement selon le bouton
+  // 3. Logique de traitement unifiée pour tous les boutons
   if (activeBtn != 0) {
     uint32_t t0 = millis();
+    
+    // On détermine quel pin surveiller
+    uint32_t currentPin;
+    if (activeBtn == 1) currentPin = BTN1;
+    else if (activeBtn == 2) currentPin = BTN2;
+    else currentPin = BTN3;
 
-    // ==========================================
-    // BOUTON 2 (Team 2) : Action immédiate
-    // ==========================================
-    if (activeBtn == 2) {
-      majBLE(2);  // On envoie le code 2
-      delay(400); // Temps garanti pour l'ESP32
+    bool longPressTriggered = false;
+
+    // On boucle tant que le bouton est enfoncé
+    while (!digitalRead(currentPin)) {
       
-      // On attend que l'utilisateur lâche le bouton
-      while (!digitalRead(BTN2)) { delay(10); } 
-    }
-    // ==========================================
-    // BOUTON 1 & 3 : Détection Court / Long
-    // ==========================================
-    else {
-      uint32_t currentPin = (activeBtn == 1) ? BTN1 : BTN3;
-      bool longPressTriggered = false;
-
-      // On boucle tant que le bouton est enfoncé
-      while (!digitalRead(currentPin)) {
+      // Si on atteint les 3 secondes d'appui
+      if (millis() - t0 >= LONG_PRESS_MS) {
         
-        // Si on atteint les 3 secondes d'appui
-        if (millis() - t0 >= LONG_PRESS_MS) {
-          uint8_t longCode = (activeBtn == 1) ? 5 : 4; // 5 pour BTN1, 4 pour BTN3
-          majBLE(longCode);
-          longPressTriggered = true;
-          delay(400); // Temps garanti pour l'ESP32
-          
-          // On attend la fin du relâchement physique
-          while (!digitalRead(currentPin)) { delay(10); } 
-          break; // On sort de la boucle principale
-        }
-        delay(10);
+        // Attribution du code LONG en fonction du bouton
+        uint8_t longCode;
+        if (activeBtn == 1) longCode = 5;
+        else if (activeBtn == 2) longCode = 6;
+        else longCode = 4; // (activeBtn == 3)
+        
+        majBLE(longCode);
+        longPressTriggered = true;
+        delay(400); // Temps garanti pour l'ESP32
+        
+        // On attend la fin du relâchement physique pour ne pas déclencher l'appui court
+        while (!digitalRead(currentPin)) { delay(10); } 
+        break; // On sort de la boucle principale
       }
+      delay(10);
+    }
 
-      // Si le bouton a été relâché AVANT les 3 secondes (Appui Court)
-      if (!longPressTriggered) {
-        uint8_t shortCode = (activeBtn == 1) ? 1 : 3; // 1 pour BTN1, 3 pour BTN3
-        majBLE(shortCode); // On envoie le code court AU RELÂCHEMENT
-        delay(400);        // On force le BLE pendant 400ms pour que l'ESP32 le capte !
-      }
+    // Si le bouton a été relâché AVANT les 3 secondes (Appui Court)
+    if (!longPressTriggered) {
+      // Magie du code : pour les appuis courts, le code BLE est égal au numéro du bouton !
+      uint8_t shortCode = activeBtn; 
+      majBLE(shortCode); // On envoie le code court (1, 2 ou 3)
+      delay(400);        // On force le BLE pendant 400ms pour que l'ESP32 le capte !
     }
   }
 
