@@ -44,8 +44,7 @@ Le récepteur est conçu pour être autonome. Le Shield Seengreat permet d'évit
 
 ### Partie Émetteur (Contrôle)
 
-L'émetteur utilise un ESP32-C3 pour sa taille réduite, idéal pour une intégration dans une petite manette ou un boîtier compact.
+L'émetteur utilise ~un ESP32-C3~  une carte nrf52840 (copie Aliexpress d'une Xiao seeed studio) pour sa taille réduite, idéal pour une intégration dans une petite manette ou un boîtier compact.
 
-* **Attention Batterie :** La batterie de **60mAh** est très petite. L'ESP32 consommant environ  en mode actif, l'autonomie sera d'environ **30 à 40 minutes**.
-* *Conseil :* Utiliser le protocole **ESP-NOW** plutôt que le Wi-Fi classique pour réduire la consommation et la latence.
+On utilise le protocol de communication BLE entre l'émetteur et le recepteur, ainsi que du deep sleep pour que l'emetteur ne soit allumé que pour l'envoie de la donnée, et éteint sinon.
 
