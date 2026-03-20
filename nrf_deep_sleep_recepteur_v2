@@ -4,6 +4,7 @@
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 #include <vector>
+#include "esp_bt.h" // Ajout pour contrôler la puissance radio
 
 // -------- CONFIGURATION MATRICE --------
 #define PANEL_RES_X 64
@@ -14,18 +15,19 @@ HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
 MatrixPanel_I2S_DMA *dma_display;
 
 // -------- CONFIGURATION BLE --------
-String targetMac = "fb:99:0c:78:cd:69";
+String targetMac = "ed:22:64:61:b8:12";
 uint8_t dernierEtat = 255; 
 BLEScan* pBLEScan;
 
 // -------- ÉTATS DU SYSTÈME --------
-enum SystemState { STATE_BOOT, STATE_GAME, STATE_MENU_GAMES, STATE_MENU_ADVANTAGE };
+enum SystemState { STATE_BOOT, STATE_GAME, STATE_MENU_GAMES, STATE_MENU_ADVANTAGE, STATE_MENU_BRIGHTNESS };
 SystemState currentState = STATE_BOOT;
 
-// -------- CONFIGURATION JEU --------
+// -------- CONFIGURATION JEU & AFFICHAGE --------
 int configGamesPerSet = 6;
 int configAdvantageMode = 0; // 0: Ad, 1: Punto de Oro, 2: 3Ad
 const char* advModeNames[] = {"STD", "Punto Oro", "3AD"};
+int currentBrightness = 153; // Luminosité par défaut (0-255), ~60%
 
 // -------- SCORE DATA --------
 int pointsTeam1_raw = 0, pointsTeam2_raw = 0;
@@ -49,9 +51,6 @@ bool tieBreakAnimationActive = false;
 unsigned long tieBreakAnimationStart = 0, lastTieBreakToggle = 0;
 bool tieBreakVisible = true;
 
-bool specialMessageActive = false;
-unsigned long specialMessageStart = 0;
-
 // -------- PROTOTYPES --------
 void drawScore();
 void drawMenu();
@@ -61,34 +60,61 @@ void recalcPoints();
 void handleAction(int act) {
     if (act == 0) return; // Release bouton
 
-    if (act == 6) { // Appui long Menu
-        if (currentState == STATE_GAME) currentState = STATE_MENU_GAMES;
-        else currentState = STATE_GAME;
-        drawMenu();
+    // --- Raccourci : Menu Principal ---
+    if (act == 4) { 
+        if (currentState == STATE_GAME) {
+            currentState = STATE_MENU_GAMES;
+            drawMenu();
+        } else {
+            currentState = STATE_GAME;
+            recalcPoints(); // recalcPoints appelle drawScore() automatiquement
+        }
         return;
     }
 
-    if (currentState != STATE_GAME) {
-        if (act == 1) { 
-            if (currentState == STATE_MENU_GAMES) configGamesPerSet = (configGamesPerSet >= 9) ? 1 : configGamesPerSet + 1;
-            else configAdvantageMode = (configAdvantageMode + 1) % 3;
-        } 
-        else if (act == 3) { 
-            if (currentState == STATE_MENU_GAMES) configGamesPerSet = (configGamesPerSet <= 1) ? 9 : configGamesPerSet - 1;
-            else configAdvantageMode = (configAdvantageMode + 2) % 3;
+    // --- Raccourci : Menu Luminosité ---
+    if (act == 5) {
+        if (currentState == STATE_GAME) {
+            currentState = STATE_MENU_BRIGHTNESS;
+            drawMenu();
+        } else {
+            currentState = STATE_GAME;
+            recalcPoints();
         }
-        else if (act == 2) { 
+        return;
+    }
+
+    // --- Gestion de la navigation dans les menus ---
+    if (currentState != STATE_GAME) {
+        if (act == 1) { // Bouton (+)
+            if (currentState == STATE_MENU_GAMES) configGamesPerSet = (configGamesPerSet >= 9) ? 1 : configGamesPerSet + 1;
+            else if (currentState == STATE_MENU_ADVANTAGE) configAdvantageMode = (configAdvantageMode + 1) % 3;
+            else if (currentState == STATE_MENU_BRIGHTNESS) {
+                currentBrightness = (currentBrightness + 25 > 255) ? 255 : currentBrightness + 25;
+                dma_display->setBrightness8(currentBrightness);
+            }
+        } 
+        else if (act == 3) { // Bouton (-)
+            if (currentState == STATE_MENU_GAMES) configGamesPerSet = (configGamesPerSet <= 1) ? 9 : configGamesPerSet - 1;
+            else if (currentState == STATE_MENU_ADVANTAGE) configAdvantageMode = (configAdvantageMode + 2) % 3;
+            else if (currentState == STATE_MENU_BRIGHTNESS) {
+                currentBrightness = (currentBrightness - 25 < 10) ? 10 : currentBrightness - 25; // Limite mini à 10 pour ne pas éteindre
+                dma_display->setBrightness8(currentBrightness);
+            }
+        }
+        else if (act == 2) { // Bouton (Valider / Suivant)
             if (currentState == STATE_MENU_GAMES) currentState = STATE_MENU_ADVANTAGE;
-            else { currentState = STATE_GAME; recalcPoints(); }
+            else { currentState = STATE_GAME; recalcPoints(); return; } // Retour au jeu après l'avantage ou la luminosité
         }
         drawMenu();
-    } else {
+    } 
+    // --- Gestion du mode Jeu ---
+    else {
         switch(act) {
             case 1: currentGameActions.push_back(1); recalcPoints(); break;
-            case 2: currentGameActions.push_back(2); recalcPoints(); break;
-            case 3: if(!currentGameActions.empty()){ currentGameActions.pop_back(); recalcPoints(); } break;
-            case 4: currentGameActions.clear(); tieBreakTriggered = false; recalcPoints(); break;
-            case 5: specialMessageActive = true; specialMessageStart = millis(); drawScore(); break;
+            case 3: currentGameActions.push_back(2); recalcPoints(); break;
+            case 2: if(!currentGameActions.empty()){ currentGameActions.pop_back(); recalcPoints(); } break;
+            case 6: currentGameActions.clear(); tieBreakTriggered = false; recalcPoints(); break;
         }
     }
 }
@@ -98,7 +124,6 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice advertisedDevice) {
         if (advertisedDevice.getAddress().toString() == targetMac.c_str()) {
             if (advertisedDevice.haveManufacturerData()) {
-                // Utilisation de String Arduino pour éviter les erreurs de type std::string
                 String mfgData = advertisedDevice.getManufacturerData();
                 int len = mfgData.length();
                 if (len > 0) {
@@ -160,6 +185,7 @@ void recalcPoints() {
     inTieBreak = tieBreak;
     advTeam1 = (!tieBreak && p1 >= 3 && p2 >= 3 && p1 == p2 + 1);
     advTeam2 = (!tieBreak && p2 >= 3 && p1 >= 3 && p2 == p1 + 1);
+    
     if (currentState == STATE_GAME) drawScore();
 }
 
@@ -174,13 +200,6 @@ bool computeServer(bool tieBreak, int p1, int p2, int g1, int g2) {
 }
 
 void drawScore() {
-    if (specialMessageActive) {
-        dma_display->clearScreen();
-        dma_display->setTextSize(1);
-        dma_display->setCursor(16, 7); dma_display->print("GROSSE");
-        dma_display->setCursor(16, 17); dma_display->print("MERDE");
-        return;
-    }
     if (tieBreakAnimationActive) {
         dma_display->clearScreen();
         dma_display->setTextSize(1);
@@ -213,13 +232,35 @@ void drawScore() {
 
 void drawMenu() {
     dma_display->clearScreen();
-    dma_display->setTextSize(1); dma_display->setTextColor(dma_display->color565(255, 255, 0));
-    dma_display->setCursor(2, 2); dma_display->print("MENU");
-    dma_display->setCursor(0, 22); dma_display->print("> ");
+    dma_display->setTextSize(1); 
+    dma_display->setTextColor(dma_display->color565(0, 255, 255)); // Couleur Cyan
+    
+    // Ligne 1 : Titre du menu
+    dma_display->setCursor(2, 2); 
+    dma_display->print("MENU");
+    
     if (currentState == STATE_MENU_GAMES) {
-        dma_display->setCursor(2, 12); dma_display->print("JEUX/SET: "); dma_display->print(configGamesPerSet);
-    } else {
-        dma_display->setCursor(2, 12); dma_display->print("REGLE AD: "); dma_display->print(advModeNames[configAdvantageMode]);
+        dma_display->setCursor(2, 12); 
+        dma_display->print("JEUX/SET ");
+        dma_display->setCursor(0, 22); 
+        dma_display->print(">"); 
+        dma_display->print(configGamesPerSet);
+    } 
+    else if (currentState == STATE_MENU_ADVANTAGE) {
+        dma_display->setCursor(2, 12); 
+        dma_display->print("REGLE AD ");
+        dma_display->setCursor(0, 22); 
+        dma_display->print(">"); 
+        dma_display->print(advModeNames[configAdvantageMode]);
+    }
+    else if (currentState == STATE_MENU_BRIGHTNESS) {
+        dma_display->setCursor(2, 12); 
+        dma_display->print("LUMINOSITE "); 
+        dma_display->setCursor(0, 22); 
+        dma_display->print(">"); 
+        int percent = map(currentBrightness, 0, 255, 0, 100); 
+        dma_display->print(percent); 
+        dma_display->print("%");
     }
 }
 
@@ -232,9 +273,12 @@ void setup() {
     mxconfig.gpio.d=21; mxconfig.gpio.e=32;
     mxconfig.gpio.lat=19; mxconfig.gpio.oe=15; mxconfig.gpio.clk=2;
 
+    Serial.begin(115200); 
+    Serial.println("Démarrage de DIGICOURT avec BLE...");
+
     dma_display = new MatrixPanel_I2S_DMA(mxconfig);
     dma_display->begin();
-    dma_display->setBrightness8(150);
+    dma_display->setBrightness8(currentBrightness); // On applique la luminosité par défaut
 
     // Splash Screen
     dma_display->clearScreen();
@@ -243,6 +287,13 @@ void setup() {
 
     // BLE Init
     BLEDevice::init("DIGICOURT_RCV");
+
+    // --- AJOUT POUR LA PORTÉE MAXIMALE ---
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P9); 
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P9);
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, ESP_PWR_LVL_P9);
+    // -------------------------------------
+
     pBLEScan = BLEDevice::getScan();
     pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks(), true);
     pBLEScan->setActiveScan(true);
@@ -256,9 +307,6 @@ void loop() {
 
     // Boot Delay
     if (currentState == STATE_BOOT && now > 4000) { currentState = STATE_GAME; recalcPoints(); }
-
-    // Message spécial
-    if (specialMessageActive && now - specialMessageStart > 5000) { specialMessageActive = false; drawScore(); }
 
     // Animations Tie Break
     if (tieBreakAnimationActive) {
