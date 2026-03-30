@@ -1,0 +1,35 @@
+#include <Arduino.h>
+#include <Adafruit_TinyUSB.h>
+void setup() {
+  Serial.begin(115200);
+  while (!Serial); // Attendre l'ouverture du moniteur série
+
+  Serial.println("--- Récupération de l'adresse MAC (nRF52840) ---");
+
+  // Les adresses MAC sont stockées dans les registres DEVICEADDR[0] et DEVICEADDR[1]
+  // FICR : Factory Information Configuration Registers
+  uint32_t addr0 = NRF_FICR->DEVICEADDR[0];
+  uint32_t addr1 = NRF_FICR->DEVICEADDR[1];
+
+  // L'adresse MAC est composée de 6 octets (48 bits)
+  // On combine les 32 bits de DEVICEADDR[0] et les 16 bits de DEVICEADDR[1]
+  uint8_t mac[6];
+  mac[0] = (uint8_t)(addr1 >> 8);   // Octet de poids fort (MSB)
+  mac[1] = (uint8_t)(addr1);
+  mac[2] = (uint8_t)(addr0 >> 24);
+  mac[3] = (uint8_t)(addr0 >> 16);
+  mac[4] = (uint8_t)(addr0 >> 8);
+  mac[5] = (uint8_t)(addr0);        // Octet de poids faible (LSB)
+
+  Serial.print("Adresse MAC : ");
+  for (int i = 0; i < 6; i++) {
+    if (mac[i] < 0x10) Serial.print("0"); // Ajout du zéro de remplissage
+    Serial.print(mac[i], HEX);
+    if (i < 5) Serial.print(":");
+  }
+  Serial.println();
+}
+
+void loop() {
+  // Rien ici
+}
