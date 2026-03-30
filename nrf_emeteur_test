@@ -1,0 +1,132 @@
+#include <bluefruit.h>
+#include "nrf_gpio.h"
+
+#define BTN1 D0 // Team 1
+#define BTN2 D1 // Team 2
+#define BTN3 D2 // Undo
+
+#define LONG_PRESS_MS 3000  // 3 secondes
+#define ACTIVE_WINDOW 2000  // Temps d'éveil (2 secondes) après le dernier clic
+
+void majBLE(uint8_t code) {
+  Bluefruit.Advertising.stop();
+  Bluefruit.Advertising.clearData();
+  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+  Bluefruit.Advertising.addName();
+  Bluefruit.Advertising.addData(BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, &code, 1);
+  Bluefruit.Advertising.setInterval(32, 32);
+  Bluefruit.Advertising.start(0);
+}
+
+void setup() {
+  pinMode(BTN1, INPUT_PULLUP);
+  pinMode(BTN2, INPUT_PULLUP);
+  pinMode(BTN3, INPUT_PULLUP);
+
+  // Init BLE EN PREMIER, avant de lire le LATCH
+  // → On s'assure que le BLE est prêt avant toute tentative d'envoi
+  Bluefruit.begin();
+  Bluefruit.setTxPower(4);
+  Bluefruit.setName("NRF_BTN");
+  Bluefruit.autoConnLed(false);
+
+  // Lecture du LATCH après l'init BLE
+  // → Si le boot a pris 300ms et que le doigt est déjà relâché,
+  //    le LATCH garde la trace de l'appui même si digitalRead() = HIGH
+  uint32_t latch = NRF_P0->LATCH;
+  NRF_P0->LATCH = latch; // Efface la mémoire matérielle
+
+  uint32_t dernierClic = millis();
+
+  // =========================================================================
+  // LA BOUCLE D'ÉVEIL
+  // =========================================================================
+  while (millis() - dernierClic < ACTIVE_WINDOW) {
+
+    uint8_t activeBtn = 0;
+    bool wasLatch = false;
+
+    // --- Détection : LATCH en priorité, puis digitalRead ---
+    // Le LATCH détecte les appuis rapides déjà terminés au moment du boot
+    if      (latch & (1 << g_ADigitalPinMap[BTN1])) { activeBtn = 1; wasLatch = true; }
+    else if (latch & (1 << g_ADigitalPinMap[BTN2])) { activeBtn = 2; wasLatch = true; }
+    else if (latch & (1 << g_ADigitalPinMap[BTN3])) { activeBtn = 3; wasLatch = true; }
+    else if (!digitalRead(BTN1)) activeBtn = 1;
+    else if (!digitalRead(BTN2)) activeBtn = 2;
+    else if (!digitalRead(BTN3)) activeBtn = 3;
+
+    latch = 0; // Vide le LATCH pour ne pas boucler sur le même évènement
+
+    if (activeBtn != 0) {
+      uint32_t currentPin = (activeBtn == 1) ? BTN1 : (activeBtn == 2 ? BTN2 : BTN3);
+
+      // =======================================================================
+      // CAS 1 : Réveil via LATCH et doigt déjà relâché → appui court immédiat
+      // C'est LE fix principal : on ne tente pas de lire digitalRead en boucle
+      // sur un bouton déjà relâché, on envoie directement le code court.
+      // =======================================================================
+      if (wasLatch && digitalRead(currentPin)) {
+        majBLE(activeBtn); // Envoie 1, 2 ou 3
+        delay(200);
+        majBLE(0);         // Relâchement
+        delay(100);
+        dernierClic = millis();
+      }
+      // =======================================================================
+      // CAS 2 : Doigt encore enfoncé → gestion normale court / long press
+      // =======================================================================
+      else if (!digitalRead(currentPin)) {
+        uint32_t t0 = millis();
+        bool longPressTriggered = false;
+
+        while (!digitalRead(currentPin)) {
+          if (millis() - t0 >= LONG_PRESS_MS) {
+            uint8_t longCode = (activeBtn == 1) ? 5 : (activeBtn == 2 ? 6 : 4);
+            majBLE(longCode);
+            longPressTriggered = true;
+
+            delay(200);
+            while (!digitalRead(currentPin)) { delay(10); } // Attendre le relâchement
+            break;
+          }
+          delay(10);
+        }
+
+        if (!longPressTriggered) {
+          majBLE(activeBtn); // Appui court : envoie 1, 2 ou 3
+          delay(200);
+        }
+
+        // Doigt relâché → envoie le code 0
+        majBLE(0);
+        delay(100);
+
+        dernierClic = millis();
+      }
+    }
+
+    delay(10);
+  }
+
+  // =========================================================================
+  // FIN DE LA FENÊTRE D'ÉVEIL → DEEP SLEEP
+  // =========================================================================
+  Bluefruit.Advertising.stop();
+  pinMode(BTN1, INPUT);
+  pinMode(BTN2, INPUT);
+  pinMode(BTN3, INPUT);
+
+  uint32_t hwPins[3] = {
+    g_ADigitalPinMap[BTN1],
+    g_ADigitalPinMap[BTN2],
+    g_ADigitalPinMap[BTN3]
+  };
+  for (int i = 0; i < 3; i++) {
+    nrf_gpio_cfg_sense_input(hwPins[i], NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+  }
+
+  sd_softdevice_disable();
+  NRF_POWER->SYSTEMOFF = 1;
+}
+
+void loop() {}
