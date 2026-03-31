@@ -1,0 +1,114 @@
+#include <bluefruit.h>
+#include "nrf_gpio.h"
+
+#define BTN1 D0 // Team 1
+#define BTN2 D1 // Team 2
+#define BTN3 D2 // Undo
+
+#define LONG_PRESS_MS 3000 
+#define ACTIVE_WINDOW 2000 
+
+void majBLE(uint8_t code) {
+  Bluefruit.Advertising.stop();
+  Bluefruit.Advertising.clearData();
+  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+  Bluefruit.Advertising.addName();
+  Bluefruit.Advertising.addData(BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, &code, 1);
+  Bluefruit.Advertising.setInterval(32, 32); 
+  Bluefruit.Advertising.start(0);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  uint32_t latch = NRF_P0->LATCH;
+  NRF_P0->LATCH = latch; 
+
+  pinMode(BTN1, INPUT_PULLUP);
+  pinMode(BTN2, INPUT_PULLUP);
+  pinMode(BTN3, INPUT_PULLUP);
+
+  Bluefruit.begin();
+  Bluefruit.setTxPower(4);
+  Bluefruit.setName("NRF_BTN");
+  Bluefruit.autoConnLed(false);
+
+  uint32_t dernierClic = millis(); 
+
+  while (millis() - dernierClic < ACTIVE_WINDOW) {
+    
+    uint8_t activeBtn = 0;
+    
+    if      (!digitalRead(BTN1) || (latch & (1 << g_ADigitalPinMap[BTN1]))) activeBtn = 1;
+    else if (!digitalRead(BTN2) || (latch & (1 << g_ADigitalPinMap[BTN2]))) activeBtn = 2;
+    else if (!digitalRead(BTN3) || (latch & (1 << g_ADigitalPinMap[BTN3]))) activeBtn = 3;
+
+    latch = 0; 
+
+    if (activeBtn != 0) {
+      Serial.println("\n--- NOUVELLE ACTION ---");
+      Serial.print("Bouton detecte : ");
+      Serial.println(activeBtn);
+      
+      // =========================================================================
+      // LA RUSE : ON AFFICHE L'ADRESSE MAC ICI !
+      // =========================================================================
+      ble_gap_addr_t mac = Bluefruit.getAddr();
+      Serial.print("=> VOICI L'ADRESSE MAC : ");
+      for(int i = 5; i >= 0; i--) {
+        if(mac.addr[i] < 0x10) Serial.print("0"); 
+        Serial.print(mac.addr[i], HEX);
+        if(i > 0) Serial.print(":");
+      }
+      Serial.println(); // Retour à la ligne
+      // =========================================================================
+
+      uint32_t t0 = millis();
+      uint32_t currentPin = (activeBtn == 1) ? BTN1 : (activeBtn == 2 ? BTN2 : BTN3);
+      bool longPressTriggered = false;
+
+      while (!digitalRead(currentPin)) {
+        if (millis() - t0 >= LONG_PRESS_MS) {
+          uint8_t longCode = (activeBtn == 1) ? 5 : (activeBtn == 2 ? 6 : 4);
+          majBLE(longCode);
+          longPressTriggered = true;
+          delay(200); 
+          while (!digitalRead(currentPin)) { delay(10); } 
+          break; 
+        }
+        delay(10);
+      }
+
+      if (!longPressTriggered) {
+        majBLE(activeBtn); 
+        delay(200);        
+      }
+
+      majBLE(0);
+      delay(100); 
+
+      dernierClic = millis(); 
+    }
+    
+    delay(10); 
+  }
+
+  // Fin et dodo
+  Serial.println("\nZzz... Deep Sleep.");
+  delay(100); 
+
+  Bluefruit.Advertising.stop();
+  pinMode(BTN1, INPUT);
+  pinMode(BTN2, INPUT);
+  pinMode(BTN3, INPUT);
+
+  uint32_t hwPins[3] = {g_ADigitalPinMap[BTN1], g_ADigitalPinMap[BTN2], g_ADigitalPinMap[BTN3]};
+  for (int i = 0; i < 3; i++) {
+    nrf_gpio_cfg_sense_input(hwPins[i], NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+  }
+
+  sd_softdevice_disable();
+  NRF_POWER->SYSTEMOFF = 1;
+}
+
+void loop() {}
