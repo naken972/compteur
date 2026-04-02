@@ -144,7 +144,7 @@ class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) {
     if (advertisedDevice.getAddress().toString() == targetMac.c_str()) {
       if (advertisedDevice.haveManufacturerData()) {
-        std::string mfgData = advertisedDevice.getManufacturerData();
+        String mfgData = advertisedDevice.getManufacturerData();
 
         uint8_t boutonCode = 255;
 
