@@ -84,21 +84,24 @@ void applyBrightness() {
 void handleAction(int act) {
   if (act == 0) return;
 
-  // Si match terminé, seul le reset (act 6 = long press BTN2) relance
+  // Si match terminé : un appui sur A (1) ou B (3) reset pour une nouvelle partie
+  // Le long press reset (6) fonctionne aussi. Les menus restent accessibles.
   if (matchOver && currentState == STATE_GAME) {
-    if (act == 6) {
+    if (act == 1 || act == 3 || act == 6) {
+      Serial.println("[MATCH] Reset -> nouvelle partie");
       matchOver = false;
       matchOverAnimationActive = false;
       matchWinner = 0;
       currentGameActions.clear();
       tieBreakTriggered = false;
       recalcPoints();
+      return;
     }
     // Les menus restent accessibles
     else if (act == 4 || act == 5) {
       // Laisser tomber dans le code ci-dessous
     } else {
-      return; // Ignore les points pendant match over
+      return; // Ignore les autres actions pendant match over
     }
   }
 
