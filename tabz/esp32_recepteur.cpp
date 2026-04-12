@@ -378,7 +378,7 @@ void drawScore() {
     dma_display->clearScreen();
     dma_display->setTextSize(1);
     if (tieBreakVisible) {
-      dma_display->setTextColor(dma_display->color565(255, 255, 0));
+      dma_display->setTextColor(dma_display->color565(0, 255, 255));
       dma_display->setCursor(5, 12);
       dma_display->print("TIE BREAK");
     }
