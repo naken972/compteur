@@ -15,7 +15,7 @@ HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
 MatrixPanel_I2S_DMA *dma_display;
 
 // -------- CONFIGURATION BLE --------
-String targetMac = "f3:d3:3d:71:e8:9c";
+String targetMac = "e3:b7:5e:9d:d8:bf";
 uint8_t dernierEtat = 255;
 BLEScan* pBLEScan;
 
