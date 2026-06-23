@@ -15,7 +15,8 @@ HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
 MatrixPanel_I2S_DMA *dma_display;
 
 // -------- CONFIGURATION BLE --------
-String targetMac = "e3:b7:5e:9d:d8:bf";
+// Adresse MAC cible en little-endian (bytes inversés)
+const uint8_t targetMacBytes[6] = {0xDD, 0x94, 0xC1, 0x30, 0x7E, 0x36};
 uint8_t dernierEtat = 255;
 BLEScan* pBLEScan;
 
@@ -34,8 +35,6 @@ int configGamesPerSet = 6;
 int configAdvantageMode = 0; // 0: Ad (STD), 1: Punto de Oro, 2: 3Ad
 const char* advModeNames[] = {"STD", "Punto Oro", "3AD"};
 
-// Luminosité : tranches de 10% propres (0, 10, 20, ..., 100)
-// On stocke le pourcentage directement, conversion en 0-255 à l'application
 int brightnessPercent = 60; // 60% par défaut
 
 // -------- SCORE DATA --------
@@ -46,8 +45,8 @@ int currentSetIdx = 0;
 bool advTeam1 = false, advTeam2 = false;
 bool inTieBreak = false;
 bool tieBreakTriggered = false;
-bool matchOver = false;         // Best of 3 : match terminé
-bool isDecisivePoint = false;   // Punto de Oro ou 3Ad : point décisif
+bool matchOver = false;
+bool isDecisivePoint = false;
 
 std::vector<int> currentGameActions;
 const char* pointStr[] = {"0", "15", "30", "40"};
@@ -62,11 +61,10 @@ bool tieBreakAnimationActive = false;
 unsigned long tieBreakAnimationStart = 0, lastTieBreakToggle = 0;
 bool tieBreakVisible = true;
 
-// Animation fin de match
 bool matchOverAnimationActive = false;
 unsigned long matchOverAnimationStart = 0, lastMatchOverToggle = 0;
 bool matchOverVisible = true;
-int matchWinner = 0; // 1 ou 2
+int matchWinner = 0;
 
 // -------- PROTOTYPES --------
 void drawScore();
@@ -84,28 +82,27 @@ void applyBrightness() {
 void handleAction(int act) {
   if (act == 0) return;
 
-  // Si match terminé : un appui sur A (1) ou B (3) reset pour une nouvelle partie
-  // Le long press reset (6) fonctionne aussi. Les menus restent accessibles.
+  // Bloquer les actions pendant les animations
+  if (tieBreakAnimationActive) return;
+
+  // Si match terminé, seul le reset (act 6) ou les menus sont accessibles
   if (matchOver && currentState == STATE_GAME) {
-    if (act == 1 || act == 3 || act == 6) {
-      Serial.println("[MATCH] Reset -> nouvelle partie");
+    if (act == 6) {
       matchOver = false;
       matchOverAnimationActive = false;
       matchWinner = 0;
       currentGameActions.clear();
       tieBreakTriggered = false;
       recalcPoints();
-      return;
     }
-    // Les menus restent accessibles
     else if (act == 4 || act == 5) {
-      // Laisser tomber dans le code ci-dessous
+      // Laisser passer vers la gestion des menus ci-dessous
     } else {
-      return; // Ignore les autres actions pendant match over
+      return;
     }
   }
 
-  // --- Raccourci : Menu Principal (long press BTN3 = code 4) ---
+  // --- Menu Principal (long press BTN3 = code 4) ---
   if (act == 4) {
     if (currentState == STATE_GAME) {
       currentState = STATE_MENU_GAMES;
@@ -117,7 +114,7 @@ void handleAction(int act) {
     return;
   }
 
-  // --- Raccourci : Menu Luminosité (long press BTN1 = code 5) ---
+  // --- Menu Luminosité (long press BTN1 = code 5) ---
   if (act == 5) {
     if (currentState == STATE_GAME) {
       currentState = STATE_MENU_BRIGHTNESS;
@@ -129,9 +126,9 @@ void handleAction(int act) {
     return;
   }
 
-  // --- Gestion de la navigation dans les menus ---
+  // --- Navigation dans les menus ---
   if (currentState != STATE_GAME) {
-    if (act == 1) { // Bouton (+)
+    if (act == 1) {
       if (currentState == STATE_MENU_GAMES)
         configGamesPerSet = (configGamesPerSet >= 9) ? 1 : configGamesPerSet + 1;
       else if (currentState == STATE_MENU_ADVANTAGE)
@@ -141,7 +138,7 @@ void handleAction(int act) {
         applyBrightness();
       }
     }
-    else if (act == 3) { // Bouton (-)
+    else if (act == 3) {
       if (currentState == STATE_MENU_GAMES)
         configGamesPerSet = (configGamesPerSet <= 1) ? 9 : configGamesPerSet - 1;
       else if (currentState == STATE_MENU_ADVANTAGE)
@@ -151,7 +148,7 @@ void handleAction(int act) {
         applyBrightness();
       }
     }
-    else if (act == 2) { // Bouton (Valider / Suivant)
+    else if (act == 2) {
       if (currentState == STATE_MENU_GAMES)
         currentState = STATE_MENU_ADVANTAGE;
       else {
@@ -162,7 +159,7 @@ void handleAction(int act) {
     }
     drawMenu();
   }
-  // --- Gestion du mode Jeu ---
+  // --- Mode Jeu ---
   else {
     switch (act) {
       case 1: currentGameActions.push_back(1); recalcPoints(); break;
@@ -188,28 +185,28 @@ void handleAction(int act) {
 // ================= CALLBACKS BLE =================
 class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) {
-    if (advertisedDevice.getAddress().toString() == targetMac.c_str()) {
-      if (advertisedDevice.haveManufacturerData()) {
-        String mfgData = advertisedDevice.getManufacturerData();
+    // Comparaison binaire directe de la MAC (rapide, pas d'allocation String)
+    if (memcmp(advertisedDevice.getAddress().getNative(), targetMacBytes, 6) != 0) return;
 
-        uint8_t boutonCode = 255;
+    if (!advertisedDevice.haveManufacturerData()) return;
 
-        // Format correct : [Company_ID_Lo][Company_ID_Hi][code] = 3 bytes
-        if (mfgData.length() >= 3) {
-          boutonCode = (uint8_t)mfgData[2];
-        }
-        // Rétrocompatibilité ancien firmware (1 byte sans Company ID)
-        else if (mfgData.length() == 1) {
-          boutonCode = (uint8_t)mfgData[0];
-        }
+    String mfgData = advertisedDevice.getManufacturerData();
+    uint8_t boutonCode = 255;
 
-        if (boutonCode != 255 && boutonCode != dernierEtat) {
-          dernierEtat = boutonCode;
-          Serial.print("[BLE] Code recu: ");
-          Serial.println(boutonCode);
-          handleAction(boutonCode);
-        }
-      }
+    // Format avec Company ID : [CID_Lo][CID_Hi][code] = 3 bytes
+    if (mfgData.length() >= 3) {
+      boutonCode = (uint8_t)mfgData[2];
+    }
+    // Rétrocompatibilité ancien firmware (1 byte sans Company ID)
+    else if (mfgData.length() == 1) {
+      boutonCode = (uint8_t)mfgData[0];
+    }
+
+    if (boutonCode != 255 && boutonCode != dernierEtat) {
+      dernierEtat = boutonCode;
+      Serial.print("[BLE] Code recu: ");
+      Serial.println(boutonCode);
+      handleAction(boutonCode);
     }
   }
 };
@@ -230,7 +227,6 @@ void recalcPoints() {
   int mWinner = 0;
 
   for (int act : currentGameActions) {
-    // Si match déjà fini, ignorer les actions restantes
     if (mOver) break;
 
     if (act == 1) p1++; else p2++;
@@ -242,7 +238,6 @@ void recalcPoints() {
         setsWon1++;
         g1 = g2 = p1 = p2 = 0;
         setIdx++; tieBreak = false;
-        // Best of 3 : check victoire
         if (setsWon1 >= 2) { mOver = true; mWinner = 1; }
       } else if (p2 >= 7 && p2 - p1 >= 2) {
         g2++;
@@ -256,7 +251,6 @@ void recalcPoints() {
       if (p1 >= 3 && p2 >= 3 && p1 == p2) deuceCount++;
 
       bool gameWon = false;
-      // Point décisif : Punto de Oro à 40-40, ou 3Ad au 3ème deuce
       bool gold = (configAdvantageMode == 1 && p1 >= 3 && p2 >= 3) ||
                   (configAdvantageMode == 2 && deuceCount >= 3);
 
@@ -291,7 +285,7 @@ void recalcPoints() {
     }
   }
 
-  // Mise à jour des animations de clignotement
+  // Animation de clignotement
   if (currentState == STATE_GAME) {
     if (p1 != lastP1) blinkTeam = 1;
     else if (p2 != lastP2) blinkTeam = 2;
@@ -324,11 +318,10 @@ void recalcPoints() {
   inTieBreak = tieBreak;
   isDecisivePoint = decisive;
 
-  // Avantage standard (mode STD uniquement)
   advTeam1 = (!tieBreak && !decisive && p1 >= 3 && p2 >= 3 && p1 == p2 + 1);
   advTeam2 = (!tieBreak && !decisive && p2 >= 3 && p1 >= 3 && p2 == p1 + 1);
 
-  // Best of 3 : match terminé
+  // Match terminé
   if (mOver && !matchOver) {
     matchOver = true;
     matchWinner = mWinner;
@@ -378,7 +371,7 @@ void drawScore() {
     dma_display->clearScreen();
     dma_display->setTextSize(1);
     if (tieBreakVisible) {
-      dma_display->setTextColor(dma_display->color565(0, 255, 255));
+      dma_display->setTextColor(dma_display->color565(255, 255, 0));
       dma_display->setCursor(5, 12);
       dma_display->print("TIE BREAK");
     }
@@ -398,7 +391,6 @@ void drawScore() {
     sP2 = String(pointsTeam2_raw);
   }
   else if (isDecisivePoint) {
-    // Point décisif (Punto de Oro ou 3Ad) : afficher Ad-Ad
     sP1 = "Ad";
     sP2 = "Ad";
   }
@@ -411,7 +403,6 @@ void drawScore() {
     sP2 = "Ad";
   }
   else if (pointsTeam1_raw >= 3 && pointsTeam2_raw >= 3) {
-    // Deuce (40-40 en mode STD)
     sP1 = "40";
     sP2 = "40";
   }
@@ -447,11 +438,6 @@ void drawScore() {
   dma_display->setCursor(40 + (sP2.length() == 1 ? 6 : 0), 17);
   if (!blinkActive || blinkTeam != 2 || blinkVisible) dma_display->print(sP2);
   if (!srvA) drawBall(8, 22, c2);
-
-  // Si match terminé (après animation), afficher le score final figé
-  if (matchOver && !matchOverAnimationActive) {
-    // Le score est déjà affiché normalement, c'est OK
-  }
 }
 
 void drawMenu() {
@@ -511,14 +497,14 @@ void setup() {
   // BLE init
   BLEDevice::init("DIGICOURT_RCV");
 
-  // Puissance radio maximale
+  // Puissance radio maximale ESP32
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P9);
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV,     ESP_PWR_LVL_P9);
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN,    ESP_PWR_LVL_P9);
 
   pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks(), true);
-  pBLEScan->setActiveScan(false);  // Passive scan = écoute continue sans SCAN_REQ
+  pBLEScan->setActiveScan(false);  // Passive = écoute sans SCAN_REQ
   pBLEScan->setInterval(100);
   pBLEScan->setWindow(100);        // 100% duty cycle
   pBLEScan->start(0, scanEndedCB, false);
@@ -535,7 +521,7 @@ void loop() {
     recalcPoints();
   }
 
-  // Animation tie-break (3 secondes clignotant)
+  // Animation tie-break (3 secondes)
   if (tieBreakAnimationActive) {
     if (now - tieBreakAnimationStart > 3000) {
       tieBreakAnimationActive = false;
@@ -547,11 +533,11 @@ void loop() {
     }
   }
 
-  // Animation fin de match (5 secondes clignotant, puis score figé)
+  // Animation fin de match (5 secondes)
   if (matchOverAnimationActive) {
     if (now - matchOverAnimationStart > 5000) {
       matchOverAnimationActive = false;
-      drawScore(); // Affiche le score final figé
+      drawScore();
     } else if (now - lastMatchOverToggle > 400) {
       matchOverVisible = !matchOverVisible;
       lastMatchOverToggle = now;
