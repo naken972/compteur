@@ -23,21 +23,24 @@ BLEScan* pBLEScan;
 enum SystemState {
   STATE_BOOT,
   STATE_GAME,
-  STATE_MENU_GAMES,
-  STATE_MENU_ADVANTAGE,
-  STATE_MENU_MODE,        // <-- NOUVEAU : mode de match (sets / tie-break / super tie)
+  STATE_MENU_MODE,        // 1er écran : choix de la règle / format
+  STATE_MENU_GAMES,       // n'apparaît que pour les modes à sets
   STATE_MENU_BRIGHTNESS
 };
 SystemState currentState = STATE_BOOT;
 
 // -------- CONFIGURATION JEU & AFFICHAGE --------
 int configGamesPerSet = 6;
-int configAdvantageMode = 0; // 0: Ad (STD), 1: Punto de Oro, 2: Star Point
-const char* advModeNames[] = {"STD", "Punto Oro", "STAR PT"};  // "3AD" -> "STAR PT"
 
-// Mode de match : 0 = sets normaux, 1 = tie-break (en 7), 2 = super tie (en 10)
-int configMatchMode = 0;
-const char* matchModeNames[] = {"SETS", "TIE 7", "SUPER10"};
+// Sélection unique du mode (1er menu) :
+//   0:AD  1:PUNTO ORO  2:STAR PT  -> sets normaux (=> menu JEUX/SET)
+//   3:TIE BREAK (en 7) 4:SUPER TIE (en 10) -> tie-break unique (pas de JEUX/SET)
+int selectedMode = 0;
+const char* modeNames[] = {"AD", "PUNTO ORO", "STAR PT", "TIE BREAK", "SUPER TIE"};
+
+// Variables logiques dérivées de selectedMode (utilisées par recalcPoints)
+int configAdvantageMode = 0; // 0: Ad (STD), 1: Punto de Oro, 2: Star Point
+int configMatchMode = 0;     // 0: sets, 1: tie-break (7), 2: super tie (10)
 
 // Luminosité : tranches de 10%
 int brightnessPercent = 60;
@@ -52,7 +55,7 @@ bool inTieBreak = false;
 bool tieBreakTriggered = false;
 bool matchOver = false;
 bool isDecisivePoint = false;
-bool pureTieBreakMatch = false;   // true en mode TIE 7 / SUPER10
+bool pureTieBreakMatch = false;   // true en mode TIE BREAK / SUPER TIE
 int gamesPlayedTotal = 0;         // jeux complets joués dans TOUT le match (TB compris)
 
 std::vector<int> currentGameActions;
@@ -67,6 +70,10 @@ int blinkTeam = 0, lastP1 = 0, lastP2 = 0;
 bool tieBreakAnimationActive = false;
 unsigned long tieBreakAnimationStart = 0, lastTieBreakToggle = 0;
 bool tieBreakVisible = true;
+
+bool victoryAnimationActive = false;
+unsigned long victoryAnimationStart = 0, lastVictoryToggle = 0;
+bool victoryVisible = true;
 
 int matchWinner = 0;
 
@@ -97,6 +104,8 @@ void drawMenu();
 void recalcPoints();
 void applyBrightness();
 void handleAction(int act);
+void applySelectedMode();
+void resetMatch();
 
 // ================= UTILITAIRE LUMINOSITÉ =================
 void applyBrightness() {
@@ -104,32 +113,43 @@ void applyBrightness() {
   dma_display->setBrightness8(val);
 }
 
+// ================= UTILITAIRES MODE =================
+// Convertit selectedMode (0..4) en configAdvantageMode / configMatchMode
+void applySelectedMode() {
+  if (selectedMode <= 2) {            // AD / PUNTO / STAR -> sets
+    configMatchMode = 0;
+    configAdvantageMode = selectedMode;     // 0,1,2
+  } else {                            // TIE BREAK / SUPER TIE -> tie-break unique
+    configMatchMode = selectedMode - 2;     // 3->1 (en 7), 4->2 (en 10)
+  }
+}
+
+// Repart d'un score vierge (changement de format = nouveau match)
+void resetMatch() {
+  currentGameActions.clear();
+  matchOver = false;
+  matchWinner = 0;
+  tieBreakTriggered = false;
+  victoryAnimationActive = false;
+}
+
 // ================= LOGIQUE ACTION =================
 void handleAction(int act) {
   if (act == 0) return;
 
-  // Si match terminé : un appui sur A (1) ou B (3) reset pour une nouvelle partie
-  if (matchOver && currentState == STATE_GAME) {
-    if (act == 1 || act == 3 || act == 6) {
-      Serial.println("[MATCH] Reset -> nouvelle partie");
-      matchOver = false;
-      matchWinner = 0;
-      currentGameActions.clear();
-      tieBreakTriggered = false;
-      recalcPoints();
-      return;
-    }
-    else if (act == 4 || act == 5) {
-      // Laisser tomber dans le code ci-dessous
-    } else {
-      return;
-    }
+  // Si match terminé : n'importe quel bouton remet tout à zéro
+  if (matchOver) {
+    Serial.println("[MATCH] Reset -> nouvelle partie");
+    if (currentState != STATE_GAME) currentState = STATE_GAME;
+    resetMatch();
+    recalcPoints();
+    return;
   }
 
   // --- Raccourci : Menu Principal (long press BTN3 = code 4) ---
   if (act == 4) {
     if (currentState == STATE_GAME) {
-      currentState = STATE_MENU_GAMES;
+      currentState = STATE_MENU_MODE;     // on ouvre d'abord le choix du mode
       drawMenu();
     } else {
       currentState = STATE_GAME;
@@ -153,43 +173,41 @@ void handleAction(int act) {
   // --- Gestion de la navigation dans les menus ---
   if (currentState != STATE_GAME) {
     if (act == 1) {
-      if (currentState == STATE_MENU_GAMES)
-        configGamesPerSet = (configGamesPerSet >= 9) ? 1 : configGamesPerSet + 1;
-      else if (currentState == STATE_MENU_ADVANTAGE)
-        configAdvantageMode = (configAdvantageMode + 1) % 3;
-      else if (currentState == STATE_MENU_MODE) {
-        configMatchMode = (configMatchMode + 1) % 3;
-        // Changer le format de match => on repart d'un score vierge
-        currentGameActions.clear();
-        matchOver = false; matchWinner = 0; tieBreakTriggered = false;
+      if (currentState == STATE_MENU_MODE) {
+        selectedMode = (selectedMode + 1) % 5;
+        applySelectedMode();
+        resetMatch();                       // changement de format -> match neuf
       }
+      else if (currentState == STATE_MENU_GAMES)
+        configGamesPerSet = (configGamesPerSet >= 9) ? 1 : configGamesPerSet + 1;
       else if (currentState == STATE_MENU_BRIGHTNESS) {
         brightnessPercent = (brightnessPercent >= 100) ? 100 : brightnessPercent + 10;
         applyBrightness();
       }
     }
     else if (act == 3) {
-      if (currentState == STATE_MENU_GAMES)
-        configGamesPerSet = (configGamesPerSet <= 1) ? 9 : configGamesPerSet - 1;
-      else if (currentState == STATE_MENU_ADVANTAGE)
-        configAdvantageMode = (configAdvantageMode + 2) % 3;
-      else if (currentState == STATE_MENU_MODE) {
-        configMatchMode = (configMatchMode + 2) % 3;
-        currentGameActions.clear();
-        matchOver = false; matchWinner = 0; tieBreakTriggered = false;
+      if (currentState == STATE_MENU_MODE) {
+        selectedMode = (selectedMode + 4) % 5;
+        applySelectedMode();
+        resetMatch();
       }
+      else if (currentState == STATE_MENU_GAMES)
+        configGamesPerSet = (configGamesPerSet <= 1) ? 9 : configGamesPerSet - 1;
       else if (currentState == STATE_MENU_BRIGHTNESS) {
         brightnessPercent = (brightnessPercent <= 10) ? 10 : brightnessPercent - 10;
         applyBrightness();
       }
     }
     else if (act == 2) {
-      // Enchaînement des menus : JEUX -> REGLE AD -> MODE -> retour jeu
-      if (currentState == STATE_MENU_GAMES)
-        currentState = STATE_MENU_ADVANTAGE;
-      else if (currentState == STATE_MENU_ADVANTAGE)
-        currentState = STATE_MENU_MODE;
-      else {
+      if (currentState == STATE_MENU_MODE) {
+        if (selectedMode <= 2) {
+          currentState = STATE_MENU_GAMES;  // règle à sets -> on choisit jeux/set
+        } else {
+          currentState = STATE_GAME;        // tie-break / super tie -> direct au jeu
+          recalcPoints();
+          return;
+        }
+      } else {                              // JEUX/SET ou LUMINOSITE -> retour jeu
         currentState = STATE_GAME;
         recalcPoints();
         return;
@@ -209,10 +227,7 @@ void handleAction(int act) {
         }
         break;
       case 6:
-        currentGameActions.clear();
-        tieBreakTriggered = false;
-        matchOver = false;
-        matchWinner = 0;
+        resetMatch();
         recalcPoints();
         break;
     }
@@ -298,7 +313,7 @@ void recalcPoints() {
   int totalGames = 0;   // jeux complets joués (TB compris) -> sert au calcul du serveur
 
   // =========================================================
-  // MODE TIE-BREAK UNIQUE (TIE 7 / SUPER10) : tout le match = 1 seul tie-break
+  // MODE TIE-BREAK UNIQUE (TIE BREAK / SUPER TIE) : tout le match = 1 seul tie-break
   // =========================================================
   if (configMatchMode != 0) {
     int target = (configMatchMode == 1) ? 7 : 10;
@@ -419,6 +434,10 @@ void recalcPoints() {
   if (mOver && !matchOver) {
     matchOver = true;
     matchWinner = mWinner;
+    victoryAnimationActive = true;        // déclenche le clignotement "VICTOIRE"
+    victoryAnimationStart = millis();
+    lastVictoryToggle = millis();
+    victoryVisible = true;
     Serial.print("[MATCH] Termine ! Vainqueur : Equipe ");
     Serial.println(matchWinner);
   }
@@ -445,28 +464,30 @@ bool computeServer(bool tieBreak, int p1, int p2, int totalGames) {
 }
 
 void drawScore() {
-  // Animation tie-break
+  // Animation tie-break (cyan, comme les menus)
   if (tieBreakAnimationActive) {
     dma_display->clearScreen();
     dma_display->setTextSize(1);
     if (tieBreakVisible) {
-      dma_display->setTextColor(dma_display->color565(255, 255, 0));
+      dma_display->setTextColor(dma_display->color565(0, 255, 255));
       dma_display->setCursor(5, 12);
       dma_display->print("TIE BREAK");
     }
     return;
   }
 
-  // --- ÉCRAN VICTOIRE (cyan, comme le logo DIGICOURT) ---
-  if (matchOver) {
+  // --- ANIMATION VICTOIRE (clignote en cyan quelques secondes) ---
+  // Une fois l'animation finie, on retombe sur l'affichage du score final.
+  if (victoryAnimationActive) {
     dma_display->clearScreen();
     dma_display->setTextSize(1);
-    uint16_t cyan = dma_display->color565(0, 255, 255);
-    dma_display->setTextColor(cyan);
-    dma_display->setCursor(8, 8);          // "VICTOIRE" centré (8 car. x 6px)
-    dma_display->print("VICTOIRE");
-    dma_display->setCursor(8, 18);         // "EQUIPE A" / "EQUIPE B"
-    dma_display->print(matchWinner == 1 ? "EQUIPE A" : "EQUIPE B");
+    if (victoryVisible) {
+      dma_display->setTextColor(dma_display->color565(0, 255, 255));
+      dma_display->setCursor(8, 8);          // "VICTOIRE" centré (8 car. x 6px)
+      dma_display->print("VICTOIRE");
+      dma_display->setCursor(8, 18);         // "EQUIPE A" / "EQUIPE B"
+      dma_display->print(matchWinner == 1 ? "EQUIPE A" : "EQUIPE B");
+    }
     return;
   }
 
@@ -543,26 +564,19 @@ void drawMenu() {
   dma_display->setCursor(2, 2);
   dma_display->print("MENU");
 
-  if (currentState == STATE_MENU_GAMES) {
+  if (currentState == STATE_MENU_MODE) {
+    dma_display->setCursor(2, 12);
+    dma_display->print("MODE");
+    dma_display->setCursor(0, 22);
+    dma_display->print(">");
+    dma_display->print(modeNames[selectedMode]);
+  }
+  else if (currentState == STATE_MENU_GAMES) {
     dma_display->setCursor(2, 12);
     dma_display->print("JEUX/SET");
     dma_display->setCursor(0, 22);
     dma_display->print(">");
     dma_display->print(configGamesPerSet);
-  }
-  else if (currentState == STATE_MENU_ADVANTAGE) {
-    dma_display->setCursor(2, 12);
-    dma_display->print("REGLE AD");
-    dma_display->setCursor(0, 22);
-    dma_display->print(">");
-    dma_display->print(advModeNames[configAdvantageMode]);
-  }
-  else if (currentState == STATE_MENU_MODE) {
-    dma_display->setCursor(2, 12);
-    dma_display->print("MODE");
-    dma_display->setCursor(0, 22);
-    dma_display->print(">");
-    dma_display->print(matchModeNames[configMatchMode]);
   }
   else if (currentState == STATE_MENU_BRIGHTNESS) {
     dma_display->setCursor(2, 12);
@@ -589,6 +603,8 @@ void setup() {
   dma_display = new MatrixPanel_I2S_DMA(mxconfig);
   dma_display->begin();
   applyBrightness();
+
+  applySelectedMode();   // synchronise configMatchMode/configAdvantageMode
 
   // Splash screen
   dma_display->clearScreen();
@@ -637,6 +653,18 @@ void loop() {
     } else if (now - lastTieBreakToggle > 300) {
       tieBreakVisible = !tieBreakVisible;
       lastTieBreakToggle = now;
+      drawScore();
+    }
+  }
+
+  // Animation victoire (clignote ~4 s, puis affiche le score final figé)
+  if (victoryAnimationActive) {
+    if (now - victoryAnimationStart > 4000) {
+      victoryAnimationActive = false;
+      drawScore();                 // bascule sur le score final
+    } else if (now - lastVictoryToggle > 300) {
+      victoryVisible = !victoryVisible;
+      lastVictoryToggle = now;
       drawScore();
     }
   }
